@@ -112,6 +112,7 @@ function pct(n){return(n*100).toFixed(1)+"%"}
 function fmtO(n){if(n===Infinity||n>1e9)return "-";if(n>=1e6)return "1:"+Math.round(n/1e6)+"M";if(n>=1e3)return "1:"+Math.round(n/1e3)+"K";return "1:"+Math.round(n)}
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
 function fN(n){return n.toLocaleString()}
+function prClr(pr){var m={1:"#c39bd3",2:"#bb8fce",3:"#af7ac5",5:"#a569bd",10:"#9b59b6",20:"#884ea0",30:"#7d3c98",50:"#6c3483",100:"#5b2c6f"};return m[pr]||"#9b59b6"}
 
 function analyze(g){
   var pc=Math.round(g.tot/g.pk),i,j,p,ratio,above;
@@ -265,6 +266,9 @@ async function refreshAllData(){
         }
         if(!ex&&ng.pz&&ng.pz.length>0&&ng.pr>0){
           ng.id=String(ng.gn);ng.pk=PKS[ng.pr]||50;
+          var GR={1:4,2:4,3:6,5:10,10:20,20:30,30:50,50:100,100:150};
+          ng.guar=GR[ng.pr]||ng.pr*2;
+          if(!ng.odds||ng.odds<=1){var wp=0;ng.pz.forEach(function(p2){wp+=p2.p});var OD={1:4.65,2:4.37,3:4.29,5:4.21,10:4.15,20:3.85,30:3.49,50:3.82,100:3.49};ng.odds=OD[ng.pr]||4;ng.tot=Math.round(wp*ng.odds)}
           GD.push(ng);
         }
       });
@@ -421,6 +425,7 @@ function render(){
         {l:"Win Odds",v:"1:"+Math.round(a.winOdds),c:a.winOdds<a.g.odds?"g":"d"},
         {l:"Top Prize Odds",v:a.tpr>0?fmtO(a.tpo):"GONE",c:a.tpr>0?"b":"r"},
         {l:"ORP/Pack",v:pct(a.orpC),c:"p"},
+        {l:"Markov",v:a.gm.sig.replace("_"," "),c:a.gm.sig==="STRONG_BUY"?"g":a.gm.sig==="BUY"?"b":a.gm.sig==="AVOID"?"r":"d"},
         {l:"Above BTP Claimed",v:pct(a.abvPct),c:a.abvPct<a.mat?"g":a.abvPct>a.mat*1.1?"r":"d"},
         {l:"Below BTP Claimed",v:pct(a.blwPct),c:a.blwPct>a.mat?"g":a.blwPct<a.mat*0.9?"r":"d"},
         {l:"Tickets Left",v:pct(1-a.mat),c:a.mat<0.5?"g":a.mat<0.8?"a":"r"},
@@ -562,6 +567,29 @@ function render(){
         o+='</td><td>';if(p.isA)o+='<span style="background:var(--grn1);color:var(--grn);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700">BTP</span>';if(p.isO)o+='<span style="background:var(--pur1);color:var(--pur);padding:2px 6px;border-radius:4px;font-size:9px;font-weight:700">OUTLIER</span>';
         o+='</td></tr>';});
       o+='</tbody></table></div>';
+      // Game-specific insights
+      var gIns=[];
+      // Generate insights for this specific game
+      if(sel.g.cs&&sel.tpr>0)gIns.push({cat:"CLOSING GAME",detail:"Closing with "+sel.tpr+" top prizes left. Fewer buyers competing.",c:"var(--amb)"});
+      if(sel.tpr===0)gIns.push({cat:"ALL TOP PRIZES CLAIMED",detail:"All "+fmt(sel.tp.a)+" prizes claimed. Avoid unless targeting lower tiers.",c:"var(--red)"});
+      if(sel.abvPct>0&&sel.mat>0.1&&sel.abvPct<sel.mat*0.85)gIns.push({cat:"ENRICHED POOL",detail:"Above-BTP "+pct(sel.abvPct)+" claimed vs "+pct(sel.mat)+" sold. Remaining packs richer.",c:"var(--grn)"});
+      if(sel.abvPct>0&&sel.mat>0.1&&sel.abvPct>sel.mat*1.2)gIns.push({cat:"DEPLETED POOL",detail:"Above-BTP "+pct(sel.abvPct)+" claimed but only "+pct(sel.mat)+" sold. Pool depleted.",c:"var(--red)"});
+      if(sel.gm.sig==="STRONG_BUY")gIns.push({cat:"STRONG BUY",detail:sel.gm.rsn,c:"var(--grn)"});
+      if(sel.gm.sig==="AVOID")gIns.push({cat:"AVOID",detail:sel.gm.rsn,c:"var(--red)"});
+      if(sel.orpS>20)gIns.push({cat:"ORP SHIFT",detail:"Outlier odds up "+Math.round(sel.orpS)+"% vs launch.",c:"var(--pur)"});
+      if(sel.mat>0.7&&sel.tpr>0&&sel.tpo<sel.g.tot/sel.tp.p*0.5)gIns.push({cat:"LATE-GAME VALUE",detail:"Top prize odds doubled. "+sel.tpr+" remain in shrinking pool.",c:"var(--grn)"});
+      if(sel.mat<0.08)gIns.push({cat:"NEW GAME",detail:"Only "+pct(sel.mat)+" sold. Full prize pool intact.",c:"var(--blu)"});
+      sel.tierAdv.forEach(function(ta){if(ta.pctB>25)gIns.push({cat:"TIER ADVANTAGE",detail:"$"+fN(ta.a)+" odds improved "+ta.pctB.toFixed(0)+"% vs launch. "+ta.rem+" left.",c:"var(--pur)"})});
+      sel.gm.ts.forEach(function(t2){if(t2.sig==="HOT"&&t2.dev<-0.2&&t2.rem>0)gIns.push({cat:"TIER HOT",detail:"$"+fN(t2.a)+" prizes "+(Math.abs(t2.dev)*100).toFixed(0)+"% underclaimed. "+t2.rem+" remain.",c:"var(--pur)"})});
+      if(gIns.length>0){
+        o+='<div class="C"><div class="L" style="margin-bottom:8px">INSIGHTS FOR THIS GAME</div>';
+        gIns.forEach(function(gi){
+          o+='<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;padding:6px 8px;background:var(--bg);border-radius:6px;border-left:3px solid '+gi.c+'">';
+          o+='<div style="font-size:9px;font-weight:700;color:'+gi.c+';white-space:nowrap;min-width:80px">'+gi.cat+'</div>';
+          o+='<div style="font-size:11px;color:var(--text)">'+esc(gi.detail)+'</div></div>';
+        });
+        o+='</div>';
+      }
       // Action
       o+='<div style="margin-top:4px"><div class="B on" onclick="startPack(\''+sel.g.id+'\')">Track Pack of This Game \u2192</div></div>';
     }
@@ -570,41 +598,42 @@ function render(){
   if(S.tab==="insights"){
     var ins=[];
     // Pattern 1: Closing games with prizes remaining — high urgency
-    S.data.forEach(function(a){if(a.g.cs&&a.tpr>0)ins.push({pri:1,cat:"CLOSING GAME",title:a.g.nm+" closing with "+a.tpr+" top prizes left",detail:"Top prize odds: "+fmtO(a.tpo)+" \u00B7 "+pct(1-a.mat)+" tickets remain. Closing = fewer buyers competing for remaining prizes.",c:"var(--amb)",id:a.g.id})});
+    S.data.forEach(function(a){if(a.g.cs&&a.tpr>0)ins.push({pri:1,cat:"CLOSING GAME",title:a.g.nm+" #"+a.g.gn+" closing with "+a.tpr+" top prizes left",detail:"Top prize odds: "+fmtO(a.tpo)+" \u00B7 "+pct(1-a.mat)+" tickets remain. Closing = fewer buyers competing for remaining prizes.",c:"var(--amb)",pr:a.g.pr,id:a.g.id})});
     // Pattern 2: Above-BTP prizes depleting SLOWER than tickets (enriched pool)
-    S.data.forEach(function(a){if(a.abvPct>0&&a.mat>0.1&&a.abvPct<a.mat*0.85)ins.push({pri:2,cat:"ENRICHED POOL",title:a.g.nm+" \u2014 outlier prizes only "+pct(a.abvPct)+" claimed vs "+pct(a.mat)+" tickets sold",detail:"Above-BTP prizes are being claimed slower than tickets are selling. Remaining packs are statistically richer than average.",c:"var(--grn)",id:a.g.id})});
+    S.data.forEach(function(a){if(a.abvPct>0&&a.mat>0.1&&a.abvPct<a.mat*0.85)ins.push({pri:2,cat:"ENRICHED POOL",title:a.g.nm+" #"+a.g.gn+" \u2014 outlier prizes only "+pct(a.abvPct)+" claimed vs "+pct(a.mat)+" tickets sold",detail:"Above-BTP prizes are being claimed slower than tickets are selling. Remaining packs are statistically richer than average.",c:"var(--grn)",pr:a.g.pr,id:a.g.id})});
     // Pattern 3: Above-BTP depleting FASTER (depleted pool)
-    S.data.forEach(function(a){if(a.abvPct>0&&a.mat>0.1&&a.abvPct>a.mat*1.2)ins.push({pri:3,cat:"DEPLETED POOL",title:a.g.nm+" \u2014 outliers "+pct(a.abvPct)+" claimed but only "+pct(a.mat)+" sold",detail:"Big prizes claimed faster than tickets sold. Remaining packs have below-average outlier odds.",c:"var(--red)",id:a.g.id})});
+    S.data.forEach(function(a){if(a.abvPct>0&&a.mat>0.1&&a.abvPct>a.mat*1.2)ins.push({pri:3,cat:"DEPLETED POOL",title:a.g.nm+" #"+a.g.gn+" \u2014 outliers "+pct(a.abvPct)+" claimed but only "+pct(a.mat)+" sold",detail:"Big prizes claimed faster than tickets sold. Remaining packs have below-average outlier odds.",c:"var(--red)",pr:a.g.pr,id:a.g.id})});
     // Pattern 4: All top prizes gone
-    S.data.forEach(function(a){if(a.tpr===0)ins.push({pri:1,cat:"ALL TOP PRIZES CLAIMED",title:a.g.nm+" \u2014 zero "+fmt(a.tp.a)+" prizes left",detail:"No top prize winners remaining. If game isn't closing yet, avoid.",c:"var(--red)",id:a.g.id})});
+    S.data.forEach(function(a){if(a.tpr===0)ins.push({pri:1,cat:"ALL TOP PRIZES CLAIMED",title:a.g.nm+" #"+a.g.gn+" \u2014 zero "+fmt(a.tp.a)+" prizes left",detail:"No top prize winners remaining. If game isn't closing yet, avoid.",c:"var(--red)",pr:a.g.pr,id:a.g.id})});
     // Pattern 5: New games with full prize pools
-    S.data.forEach(function(a){if(a.mat<0.08&&a.sd){ins.push({pri:4,cat:"NEW GAME",title:a.g.nm+" \u2014 only "+pct(a.mat)+" sold since "+a.sd,detail:"Full prize pool intact. All "+a.tp.p+" top prizes ("+fmt(a.tp.a)+") still available. ORP at launch odds: "+pct(a.orpO)+".",c:"var(--blu)",id:a.g.id})}});
+    S.data.forEach(function(a){if(a.mat<0.08&&a.sd){ins.push({pri:4,cat:"NEW GAME",title:a.g.nm+" #"+a.g.gn+" \u2014 only "+pct(a.mat)+" sold since "+a.sd,detail:"Full prize pool intact. All "+a.tp.p+" top prizes ("+fmt(a.tp.a)+") still available. ORP at launch odds: "+pct(a.orpO)+".",c:"var(--blu)",pr:a.g.pr,id:a.g.id})}});
     // Pattern 6: Strong Markov BUY signal
-    S.data.forEach(function(a){if(a.gm.sig==="STRONG_BUY")ins.push({pri:2,cat:"STRONG BUY SIGNAL",title:a.g.nm+" \u2014 Markov velocity favors buyers",detail:a.gm.rsn+" Score: "+a.sc+" \u00B7 ORP: "+pct(a.orpC),c:"var(--grn)",id:a.g.id})});
+    S.data.forEach(function(a){if(a.gm.sig==="STRONG_BUY")ins.push({pri:2,cat:"STRONG BUY SIGNAL",title:a.g.nm+" #"+a.g.gn+" \u2014 Markov velocity favors buyers",detail:a.gm.rsn+" Score: "+a.sc+" \u00B7 ORP: "+pct(a.orpC),c:"var(--grn)",pr:a.g.pr,id:a.g.id})});
     // Pattern 7: ORP significantly improved vs launch
-    S.data.forEach(function(a){if(a.orpS>20)ins.push({pri:3,cat:"ORP SHIFT",title:a.g.nm+" \u2014 outlier odds up "+Math.round(a.orpS)+"% vs launch",detail:"Pack ORP improved from "+pct(a.orpO)+" at launch to "+pct(a.orpC)+" now. More above-anchor prizes per remaining pack.",c:"var(--pur)",id:a.g.id})});
+    S.data.forEach(function(a){if(a.orpS>20)ins.push({pri:3,cat:"ORP SHIFT",title:a.g.nm+" #"+a.g.gn+" \u2014 outlier odds up "+Math.round(a.orpS)+"% vs launch",detail:"Pack ORP improved from "+pct(a.orpO)+" at launch to "+pct(a.orpC)+" now. More above-anchor prizes per remaining pack.",c:"var(--pur)",pr:a.g.pr,id:a.g.id})});
     // Pattern 8: Games where maturity + top prizes create unusual odds
-    S.data.forEach(function(a){if(a.mat>0.7&&a.tpr>0&&a.tpo<a.g.tot/a.tp.p*0.5)ins.push({pri:2,cat:"LATE-GAME VALUE",title:a.g.nm+" \u2014 "+pct(a.mat)+" sold but top prize odds doubled",detail:"Top prize ("+fmt(a.tp.a)+") odds now "+fmtO(a.tpo)+" vs original "+fmtO(a.g.tot/a.tp.p)+". "+a.tpr+" remain in a shrinking pool.",c:"var(--grn)",id:a.g.id})});
+    S.data.forEach(function(a){if(a.mat>0.7&&a.tpr>0&&a.tpo<a.g.tot/a.tp.p*0.5)ins.push({pri:2,cat:"LATE-GAME VALUE",title:a.g.nm+" #"+a.g.gn+" \u2014 "+pct(a.mat)+" sold but top prize odds doubled",detail:"Top prize ("+fmt(a.tp.a)+") odds now "+fmtO(a.tpo)+" vs original "+fmtO(a.g.tot/a.tp.p)+". "+a.tpr+" remain in a shrinking pool.",c:"var(--grn)",pr:a.g.pr,id:a.g.id})});
     // Pattern 9: Extreme claim rate disparity within a game (specific tier running hot)
-    S.data.forEach(function(a){a.gm.ts.forEach(function(t){if(t.sig==="HOT"&&t.dev<-0.2&&t.rem>0)ins.push({pri:4,cat:"TIER ANOMALY",title:a.g.nm+" \u2014 $"+fN(t.a)+" tier significantly underclaimed",detail:"$"+fN(t.a)+" prizes "+(Math.abs(t.dev)*100).toFixed(0)+"% below expected claim rate. "+t.rem+" remain.",c:"var(--pur)",id:a.g.id})})});
+    S.data.forEach(function(a){a.gm.ts.forEach(function(t){if(t.sig==="HOT"&&t.dev<-0.2&&t.rem>0)ins.push({pri:4,cat:"TIER ANOMALY",title:a.g.nm+" #"+a.g.gn+" \u2014 $"+fN(t.a)+" tier significantly underclaimed",detail:"$"+fN(t.a)+" prizes "+(Math.abs(t.dev)*100).toFixed(0)+"% below expected claim rate. "+t.rem+" remain.",c:"var(--pur)",pr:a.g.pr,id:a.g.id})})});
     // Pattern 9b: Tier with biggest odds improvement (availability advantage)
-    S.data.forEach(function(a){if(a.tierAdv.length>0){var best=a.tierAdv.slice().sort(function(x,y){return y.pctB-x.pctB})[0];if(best&&best.pctB>25)ins.push({pri:3,cat:"TIER ADVANTAGE",title:a.g.nm+" \u2014 $"+fN(best.a)+" odds improved "+best.pctB.toFixed(0)+"%",detail:"$"+fN(best.a)+" prizes now "+fmtO(best.currO)+" vs "+fmtO(best.origO)+" at launch. "+best.rem+" remain. Highest improvement tier in this game.",c:"var(--pur)",id:a.g.id})}});
+    S.data.forEach(function(a){if(a.tierAdv.length>0){var best=a.tierAdv.slice().sort(function(x,y){return y.pctB-x.pctB})[0];if(best&&best.pctB>25)ins.push({pri:3,cat:"TIER ADVANTAGE",title:a.g.nm+" #"+a.g.gn+" \u2014 $"+fN(best.a)+" odds improved "+best.pctB.toFixed(0)+"%",detail:"$"+fN(best.a)+" prizes now "+fmtO(best.currO)+" vs "+fmtO(best.origO)+" at launch. "+best.rem+" remain. Highest improvement tier in this game.",c:"var(--pur)",pr:a.g.pr,id:a.g.id})}});
     // Pattern 9c: Top prize concentration — high probability per remaining pack
-    S.data.forEach(function(a){if(a.tpPack>0&&a.tpPack>0.0005){var odds=Math.round(1/a.tpPack);ins.push({pri:3,cat:"TOP PRIZE CONCENTRATION",title:a.g.nm+" \u2014 1 in "+fN(odds)+" packs has "+fmt(a.tp.a),detail:a.tpr+" top prize"+(a.tpr>1?"s":"")+" across ~"+fN(a.epr)+" remaining packs. "+(a.tpPack>0.005?"Relatively high density.":""),c:"var(--grn)",id:a.g.id})}});
+    S.data.forEach(function(a){if(a.tpPack>0&&a.tpPack>0.0005){var odds=Math.round(1/a.tpPack);ins.push({pri:3,cat:"TOP PRIZE CONCENTRATION",title:a.g.nm+" #"+a.g.gn+" \u2014 1 in "+fN(odds)+" packs has "+fmt(a.tp.a),detail:a.tpr+" top prize"+(a.tpr>1?"s":"")+" across ~"+fN(a.epr)+" remaining packs. "+(a.tpPack>0.005?"Relatively high density.":""),c:"var(--grn)",pr:a.g.pr,id:a.g.id})}});
     // Pattern 10: Cross-game: best value per price point
     var byPrice={};S.data.forEach(function(a){var k=a.g.pr;if(!byPrice[k]||a.sc>byPrice[k].sc)byPrice[k]=a});
-    Object.keys(byPrice).forEach(function(pr){var a=byPrice[pr];var cnt=S.data.filter(function(x){return x.g.pr===a.g.pr}).length;if(cnt>=2)ins.push({pri:5,cat:"BEST AT $"+pr,title:a.g.nm+" leads "+cnt+" games at $"+pr,detail:"Score: "+a.sc+" \u00B7 ORP: "+pct(a.orpC)+" \u00B7 Win odds: 1:"+Math.round(a.winOdds)+" \u00B7 "+a.tpr+"/"+a.tp.p+" top prizes left.",c:"var(--blu)",id:a.g.id})});
+    Object.keys(byPrice).forEach(function(pr){var a=byPrice[pr];var cnt=S.data.filter(function(x){return x.g.pr===a.g.pr}).length;if(cnt>=2)ins.push({pri:5,cat:"BEST AT $"+pr,title:a.g.nm+" #"+a.g.gn+" leads "+cnt+" games at $"+pr,detail:"Score: "+a.sc+" \u00B7 ORP: "+pct(a.orpC)+" \u00B7 Win odds: 1:"+Math.round(a.winOdds)+" \u00B7 "+a.tpr+"/"+a.tp.p+" top prizes left.",c:"var(--blu)",pr:a.g.pr,id:a.g.id})});
     // Pattern 11: Games with oldest start date still active (long survivors)
     var oldest=S.data.filter(function(a){return a.sd}).sort(function(a,b){var da=new Date("20"+a.sd.substring(6)+"-"+a.sd.substring(0,2)+"-"+a.sd.substring(3,5));var db=new Date("20"+b.sd.substring(6)+"-"+b.sd.substring(0,2)+"-"+b.sd.substring(3,5));return da-db}).slice(0,3);
-    oldest.forEach(function(a){var ageDays=Math.floor((new Date("2026-02-04")-new Date("20"+a.sd.substring(6)+"-"+a.sd.substring(0,2)+"-"+a.sd.substring(3,5)))/86400000);if(ageDays>365)ins.push({pri:5,cat:"LONG RUNNING",title:a.g.nm+" \u2014 "+Math.round(ageDays/30)+" months old (started "+a.sd+")",detail:pct(a.mat)+" sold. "+a.tpr+"/"+a.tp.p+" top prizes left. Older games = more predictable claim patterns.",c:"var(--dim)",id:a.g.id})});
+    oldest.forEach(function(a){var ageDays=Math.floor((new Date("2026-02-04")-new Date("20"+a.sd.substring(6)+"-"+a.sd.substring(0,2)+"-"+a.sd.substring(3,5)))/86400000);if(ageDays>365)ins.push({pri:5,cat:"LONG RUNNING",title:a.g.nm+" #"+a.g.gn+" \u2014 "+Math.round(ageDays/30)+" months old (started "+a.sd+")",detail:pct(a.mat)+" sold. "+a.tpr+"/"+a.tp.p+" top prizes left. Older games = more predictable claim patterns.",c:"var(--dim)",pr:a.g.pr,id:a.g.id})});
     // Sort by priority
     ins.sort(function(a,b){return a.pri-b.pri});
 
     o+='<div class="C"><div style="font-size:14px;font-weight:800;color:var(--wht);margin-bottom:4px">PATTERN DETECTION ENGINE</div><div style="font-size:11px;color:var(--dim);margin-bottom:12px">Auto-detected from '+S.data.length+' games \u00B7 '+ins.length+' patterns found \u00B7 Sorted by actionability</div></div>';
     if(ins.length===0)o+='<div class="C"><div class="d">No significant patterns detected. Data may be too fresh.</div></div>';
     ins.forEach(function(n){
+      var pc=n.pr?prClr(n.pr):"#9b59b6";
       o+='<div class="C ck" onclick="openDetail(\''+n.id+'\')" style="border-left:3px solid '+n.c+'">';
-      o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div><div style="font-size:9px;font-weight:700;color:'+n.c+';letter-spacing:.06em;margin-bottom:3px">'+esc(n.cat)+'</div>';
+      o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div><div style="display:flex;align-items:center;gap:6px;margin-bottom:3px"><div style="font-size:9px;font-weight:700;color:'+n.c+';letter-spacing:.06em">'+esc(n.cat)+'</div>'+(n.pr?'<div style="font-size:9px;font-weight:800;color:#fff;background:'+pc+';padding:1px 6px;border-radius:3px">$'+n.pr+'</div>':'')+'</div>';
       o+='<div style="font-size:13px;font-weight:700;color:var(--wht)">'+esc(n.title)+'</div>';
       o+='<div style="font-size:11px;color:var(--text);margin-top:4px;line-height:1.5">'+esc(n.detail)+'</div></div>';
       o+='<div style="font-size:18px;opacity:.3">\u203A</div></div></div>';
