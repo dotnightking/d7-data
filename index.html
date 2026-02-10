@@ -218,21 +218,22 @@ async function refreshAllData(){
     var json=await resp.json();
     if(json&&json.games&&json.games.length>0){
       var updated=0;
+      var PKS={1:150,2:125,3:75,5:50,10:50,20:30,30:20,50:20,100:15};
       json.games.forEach(function(ng){
         var ex=GD.find(function(g){return g.gn===ng.gn});
         if(ex&&ng.pz&&ng.pz.length>0){
-          // Update prize claimed counts
+          if(ng.pr>0)ex.pr=ng.pr;
+          if(ng.cs!==undefined)ex.cs=ng.cs;
+          if(ng.nm)ex.nm=ng.nm;
+          if(ng.pr>0&&PKS[ng.pr])ex.pk=PKS[ng.pr];
           ng.pz.forEach(function(np){
             var ep=ex.pz.find(function(p){return p.a===np.a});
-            if(ep&&typeof np.c==="number"){ep.c=np.c;updated++}
+            if(ep){ep.c=np.c;if(np.p>0)ep.p=np.p;updated++}
+            else{ex.pz.push({a:np.a,p:np.p,c:np.c});ex.pz.sort(function(a,b){return b.a-a.a});updated++}
           });
-          if(ng.tot)ex.tot=ng.tot;
-          if(ng.odds)ex.odds=ng.odds;
-          if(ng.cs!==undefined)ex.cs=ng.cs;
         }
-        // Add any new games
         if(!ex&&ng.pz&&ng.pz.length>0&&ng.pr>0){
-          ng.id=String(ng.gn);ng.pk=DA[ng.pr]?{1:150,2:125,3:75,5:50,10:50,20:30,30:20,50:20,100:15}[ng.pr]||50:50;
+          ng.id=String(ng.gn);ng.pk=PKS[ng.pr]||50;
           GD.push(ng);
         }
       });
