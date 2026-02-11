@@ -488,9 +488,12 @@ async function runAIBriefing(){
   }
   
   try{
+    var apiKey=localStorage.getItem("txr_apikey")||"";
+    var headers={"Content-Type":"application/json","anthropic-version":"2023-06-01"};
+    if(apiKey)headers["x-api-key"]=apiKey;
     var resp=await fetch("https://api.anthropic.com/v1/messages",{
       method:"POST",
-      headers:{"Content-Type":"application/json"},
+      headers:headers,
       body:JSON.stringify({
         model:"claude-sonnet-4-20250514",
         max_tokens:1000,
@@ -822,6 +825,12 @@ function render(){
     o+='<div style="font-size:14px;font-weight:800;color:#9b59b6">🧠 INTELLIGENCE BRIEFING</div>';
     o+='<div style="font-size:10px;color:var(--dim)">AI analysis of games with significant signals</div></div>';
     o+='<div class="B'+(S._aiLoading?"":" on")+'" onclick="runAIBriefing()" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6">'+(S._aiLoading?'⏳ ANALYZING...':'RUN ANALYSIS')+'</div></div>';
+    // API key input
+    var storedKey=localStorage.getItem("txr_apikey")||"";
+    o+='<div style="margin-top:8px;display:flex;gap:6px;align-items:center">';
+    o+='<span style="font-size:9px;color:var(--dim);white-space:nowrap">API Key:</span>';
+    o+='<input type="password" id="apiKeyInput" value="'+esc(storedKey)+'" placeholder="sk-ant-..." class="I" style="flex:1;font-size:10px;padding:4px 8px" onchange="localStorage.setItem(\'txr_apikey\',this.value)">';
+    o+='</div>';
     if(S._aiBriefing){
       o+='<div style="margin-top:12px;font-size:13px;color:var(--text);line-height:1.7;white-space:pre-wrap">'+esc(S._aiBriefing)+'</div>';
     }else if(!S._aiLoading){
