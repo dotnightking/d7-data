@@ -343,6 +343,7 @@ function analyze(g){
 var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pack",
   pack:{log:[],won:0,spent:0,af:false,pr:10,pk:50,nm:"",aa:100,ew:13},
   sessions:JSON.parse(localStorage.getItem("txs6")||"[]"),
+  _promptPreview:null,_allPromptPreview:null,_promptMsg:null,
   bankroll:Number(localStorage.getItem("txb6")||"1000")};
 
 // === INIT: auto-fetch, no hardcoded data ===
@@ -506,17 +507,45 @@ function copyAIPrompt(id){
   if(!a)return;
   var prompt=buildGamePrompt(a);
   navigator.clipboard.writeText(prompt).then(function(){
-    var btn=event.target;btn.textContent="✓ Copied!";btn.style.color="var(--grn)";btn.style.borderColor="var(--grn)";
-    setTimeout(function(){btn.textContent="📋 Copy AI Prompt";btn.style.color="#9b59b6";btn.style.borderColor="#9b59b6"},2000);
+    S._promptMsg="✓ Prompt copied to clipboard!";render();
+    setTimeout(function(){S._promptMsg=null;render()},3000);
   });
+}
+
+function showAIPrompt(id){
+  var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}
+  if(!a)return;
+  S._promptPreview=buildGamePrompt(a);render();
+}
+
+function downloadAIPrompt(id){
+  var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}
+  if(!a)return;
+  var prompt=buildGamePrompt(a);
+  var blob=new Blob([prompt],{type:"text/plain"});
+  var url=URL.createObjectURL(blob);
+  var dl=document.createElement("a");dl.href=url;dl.download="prompt_"+a.g.gn+"_"+a.g.nm.replace(/[^a-zA-Z0-9]/g,"_")+".txt";
+  dl.click();URL.revokeObjectURL(url);
 }
 
 function copyAllPrompt(){
   var prompt=buildAllPrompt();
   navigator.clipboard.writeText(prompt).then(function(){
-    var btn=event.target;btn.textContent="✓ Copied!";btn.style.color="var(--grn)";btn.style.borderColor="var(--grn)";
-    setTimeout(function(){btn.textContent="📋 Copy All-Games Prompt";btn.style.color="#9b59b6";btn.style.borderColor="#9b59b6"},2000);
+    S._promptMsg="✓ Prompt copied to clipboard!";render();
+    setTimeout(function(){S._promptMsg=null;render()},3000);
   });
+}
+
+function showAllPrompt(){
+  S._allPromptPreview=buildAllPrompt();render();
+}
+
+function downloadAllPrompt(){
+  var prompt=buildAllPrompt();
+  var blob=new Blob([prompt],{type:"text/plain"});
+  var url=URL.createObjectURL(blob);
+  var dl=document.createElement("a");dl.href=url;dl.download="prompt_all_games_"+new Date().toISOString().slice(0,10)+".txt";
+  dl.click();URL.revokeObjectURL(url);
 }
 function mkv(){var pk=S.pack,rem=pk.pk-pk.log.length;if(rem<=0)return null;var wf=0;for(var i=0;i<pk.log.length;i++)if(pk.log[i].w)wf++;var wl=Math.max(0,pk.ew-wf),pW=wl/rem,pA=pk.af?0:1/rem;var dec="EARLY",rsn="Pack is early — "+(pA*100).toFixed(1)+"% per ticket.";if(pk.af){dec="STOP";rsn="Anchor found. Remaining are small winners/losers.";}else if(pA>=0.15){dec="BUY";rsn=(pA*100).toFixed(1)+"% chance anchor is next. Only "+rem+" left.";}else if(pA>=0.05){dec="CONSIDER";rsn=(pA*100).toFixed(1)+"% per ticket. "+rem+" remaining.";}return{rem:rem,wl:wl,pW:pW,pA:pA,dec:dec,rsn:rsn}}
 
@@ -538,6 +567,7 @@ function render(){
   var o='<div class="H"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><h1>TX SCRATCH-OFF ENGINE v6</h1><div class="sub">'+GD.length+' games'+(DD?' · Data: '+esc(DD):'')+'</div></div>';
   o+='<div class="B'+(S._refreshing?"":" on")+'" onclick="refreshAllData()" style="font-size:10px;padding:6px 12px">'+(S._refreshing?'⏳ REFRESHING...':'↻ REFRESH')+'</div></div>';
   if(S._refreshMsg)o+='<div style="font-size:10px;color:var(--blu);margin-top:4px">'+esc(S._refreshMsg)+'</div>';
+  if(S._promptMsg)o+='<div style="font-size:11px;color:#2ecc71;margin-top:4px;font-weight:600">'+esc(S._promptMsg)+'</div>';
   o+='<div class="tabs">';
   [["picks","PICKS"],["detail","DETAIL"],["insights","INSIGHTS"],["winners","WINNERS"],["more","MORE"]].forEach(function(t){
     o+='<div class="T'+(S.tab===t[0]?" on":"")+'" onclick="setTab(\''+t[0]+'\')">'+t[1]+'</div>';});
@@ -811,7 +841,10 @@ function render(){
         o+='</div>';
       }
       o+='<div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap"><div class="B on" onclick="startPack(\''+sel.g.id+'\')">Track Pack →</div>';
-      o+='<div class="B" style="border-color:#9b59b6;color:#9b59b6" onclick="copyAIPrompt(\''+sel.g.id+'\')">📋 Copy AI Prompt</div></div>';
+      o+='<div class="B" style="border-color:#9b59b6;color:#9b59b6" onclick="copyAIPrompt(\''+sel.g.id+'\')">📋 Copy Prompt</div>';
+      o+='<div class="B" style="border-color:#9b59b6;color:#9b59b6" onclick="showAIPrompt(\''+sel.g.id+'\')">👁 Show Prompt</div>';
+      o+='<div class="B" style="border-color:#9b59b6;color:#9b59b6" onclick="downloadAIPrompt(\''+sel.g.id+'\')">⬇ .txt</div></div>';
+      if(S._promptPreview){o+='<div class="C" style="margin-top:8px;border-color:#9b59b644"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div class="L" style="color:#9b59b6">GENERATED PROMPT</div><div class="B" style="font-size:9px;padding:3px 8px;border-color:#9b59b6;color:#9b59b6" onclick="S._promptPreview=null;render()">✕ Close</div></div><pre style="font-size:10px;color:var(--text);white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto;background:var(--bg);padding:10px;border-radius:6px;line-height:1.5;margin:0">'+esc(S._promptPreview)+'</pre></div>';}
     }
   }
 
@@ -822,7 +855,9 @@ function render(){
     o+='<div class="C" style="border-color:#9b59b644"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div>';
     o+='<div style="font-size:14px;font-weight:800;color:#9b59b6">🧠 AI ANALYSIS</div>';
     o+='<div style="font-size:10px;color:var(--dim)">Generate a prompt with game data, paste into any AI chat</div></div>';
-    o+='<div class="B" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6" onclick="copyAllPrompt()">📋 Copy All-Games Prompt</div></div>';
+    o+='<div class="B" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6" onclick="copyAllPrompt()">📋 Copy</div>';
+    o+='<div class="B" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6" onclick="showAllPrompt()">👁 Show</div>';
+    o+='<div class="B" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6" onclick="downloadAllPrompt()">⬇ .txt</div></div></div>';
     // Show which games would be included
     var triggered=[];
     S.data.forEach(function(a){
@@ -840,6 +875,7 @@ function render(){
       if(triggered.length>20)o+='<span style="font-size:9px;padding:3px 8px;color:var(--dim)">+'+(triggered.length-20)+' more</span>';
       o+='</div>';
     }
+    if(S._allPromptPreview){o+='<div style="margin-top:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div class="L" style="color:#9b59b6">GENERATED PROMPT</div><div class="B" style="font-size:9px;padding:3px 8px;border-color:#9b59b6;color:#9b59b6" onclick="S._allPromptPreview=null;render()">✕ Close</div></div><pre style="font-size:10px;color:var(--text);white-space:pre-wrap;word-break:break-word;max-height:500px;overflow-y:auto;background:var(--bg);padding:10px;border-radius:6px;line-height:1.5;margin:0">'+esc(S._allPromptPreview)+'</pre></div>';}
     o+='</div>';
     
     var ins=[];
