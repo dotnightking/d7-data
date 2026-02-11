@@ -234,7 +234,7 @@ function resetPack(){S.pack.log=[];S.pack.won=0;S.pack.spent=0;S.pack.af=false;r
 function saveSession(){if(!S.pack.log.length)return;S.sessions.push({g:S.pack.nm,s:S.pack.spent,w:S.pack.won,t:S.pack.log.length,d:new Date().toLocaleDateString(),af:S.pack.af});localStorage.setItem("txs5",JSON.stringify(S.sessions));resetPack()}
 function clearSess(){S.sessions=[];localStorage.setItem("txs5","[]");render()}
 function setBR(v){S.bankroll=v;localStorage.setItem("txb5",String(v));render()}
-function startPack(id){var a;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;S.pack={log:[],won:0,spent:0,af:false,pr:a.g.pr,pk:a.g.pk,nm:a.g.nm,aa:a.aa,ew:Math.round(a.g.pk/a.g.odds)};S.tab="more";S.moreTab="pack";render()}
+function startPack(id){var a;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;S.pack={log:[],won:0,spent:0,af:false,pr:a.g.pr,pk:a.g.pk,nm:a.g.nm+' #'+a.g.gn,aa:a.aa,ew:Math.round(a.g.pk/a.g.odds)};S.tab="more";S.moreTab="pack";render()}
 function mkv(){var pk=S.pack,rem=pk.pk-pk.log.length;if(rem<=0)return null;var wf=0;for(var i=0;i<pk.log.length;i++)if(pk.log[i].w)wf++;var wl=Math.max(0,pk.ew-wf),pW=wl/rem,pA=pk.af?0:1/rem;var dec="EARLY",rsn="Pack is early - "+(pA*100).toFixed(1)+"% per ticket.";if(pk.af){dec="STOP";rsn="Anchor found. Remaining are small winners/losers.";}else if(pA>=0.15){dec="BUY";rsn=(pA*100).toFixed(1)+"% chance anchor is next. Only "+rem+" left.";}else if(pA>=0.05){dec="CONSIDER";rsn=(pA*100).toFixed(1)+"% per ticket. "+rem+" remaining.";}return{rem:rem,wl:wl,pW:pW,pA:pA,dec:dec,rsn:rsn}}
 var GAME_NUMS=[2400,2587,2588,2589,2600,2609,2619,2622,2624,2627,2631,2633,2636,2637,2644,2645,2653,2655,2658,2659,2661,2665,2668,2669,2671,2672,2677,2685,2686,2689,2690,2701,2710,2713,2714,2742,2744];
 var GAME_NAMES={};GD.forEach(function(g){GAME_NAMES[g.gn]=g.nm});
@@ -425,7 +425,7 @@ function render(){
       if(idx===0)o+='<div class="badge" style="right:12px;background:var(--grn);color:var(--bg)">TOP PICK</div>';
       if(a.g.cs)o+='<div class="badge" style="right:'+(idx===0?"95px":"12px")+';background:var(--red);color:#fff">CLOSING</div>';
       // Title row
-      o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:700;color:var(--wht);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.g.nm)+'</div>';
+      o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:700;color:var(--wht);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.g.nm)+' <span style="color:var(--dim);font-weight:400">#'+a.g.gn+'</span></div>';
       o+='<div style="font-size:11px;color:var(--dim)">#'+a.g.gn+' \u00B7 $'+a.g.pr+' \u00B7 '+a.g.pk+'/pack \u00B7 BTP:$'+a.aa+(a.sd?' \u00B7 Started '+a.sd:'')+'</div></div>';
       o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+(a.sc>=65?"var(--grn)":a.sc>=40?"var(--amb)":"var(--red)")+';font-size:28px">'+a.sc+'</div><div style="font-size:9px;color:var(--dim)">SCORE</div></div></div>';
       // Metrics
@@ -450,10 +450,10 @@ function render(){
   // === DETAIL ===
   if(S.tab==="detail"){
     o+='<select class="I" style="margin-bottom:14px" onchange="setSel(this.value)"><option value="">-- Select a game --</option>';
-    S.data.slice().sort(function(a,b){return b.sc-a.sc}).forEach(function(a){o+='<option value="'+a.g.id+'"'+(S.selId===a.g.id?" selected":"")+'>['+a.sc+'] '+esc(a.g.nm)+' ($'+a.g.pr+')</option>';});
+    S.data.slice().sort(function(a,b){return b.sc-a.sc}).forEach(function(a){o+='<option value="'+a.g.id+'"'+(S.selId===a.g.id?" selected":"")+'>['+a.sc+'] '+esc(a.g.nm)+' #'+a.g.gn+' ($'+a.g.pr+')</option>';});
     o+='</select>';
     if(sel){
-      o+='<div class="C"><div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px"><div><div style="font-size:18px;font-weight:800;color:var(--wht)">'+esc(sel.g.nm)+'</div>';
+      o+='<div class="C"><div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px"><div><div style="font-size:18px;font-weight:800;color:var(--wht)">'+esc(sel.g.nm)+' <span style="color:var(--dim);font-size:14px;font-weight:400">#'+sel.g.gn+'</span></div>';
       o+='<div style="font-size:11px;color:var(--dim);margin-top:4px">$'+sel.g.pr+' ticket \u00B7 '+sel.g.pk+' per pack = $'+sel.pkc+' \u00B7 Floor: $'+sel.g.guar+' \u00B7 Odds: 1 in '+sel.g.odds+'</div></div>';
       o+='<div style="text-align:right"><div class="V" style="color:'+(sel.sc>=65?"var(--grn)":sel.sc>=40?"var(--amb)":"var(--red)")+'">'+sel.sc+'</div><div class="L">SCORE</div></div></div>';
       o+='<div style="margin-top:8px;padding:8px 12px;background:var(--bg);border-radius:8px;font-size:12px">BTP: <strong class="g">$'+sel.aa+'</strong> <span class="d">(auto-detected)</span> \u00B7 Markov: <strong style="color:'+(sel.gm.sig.indexOf("BUY")>=0?"var(--grn)":sel.gm.sig==="AVOID"?"var(--red)":"var(--dim)")+'">'+sel.gm.sig.replace("_"," ")+'</strong></div></div>';
