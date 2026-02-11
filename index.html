@@ -82,21 +82,22 @@ function analyze(g){
   var R=function(p){return p.p-p.c};
   
   // === DATA COMPLETENESS CHECK ===
-  var complete=g.tot>0&&g.pk>0&&g.guar>0&&g.odds>0;
-  if(!complete){
-    // Without detail page data, we can still do limited analysis
-    // Estimate total tickets from TOTAL row odds if available
-    var totWinP=0;for(i=0;i<g.pz.length;i++)totWinP+=g.pz[i].p;
-    if(g.tot<=0&&g.odds>0)g.tot=Math.round(totWinP*g.odds);
-    if(g.pk<=0)g.pk=0; // truly unknown, don't guess
-  }
+  var totWinP=0;for(i=0;i<g.pz.length;i++)totWinP+=g.pz[i].p;
+  var tpvp=0;for(i=0;i<g.pz.length;i++)tpvp+=g.pz[i].a*g.pz[i].p;
   
+  // If tot is missing or produces impossible return (>95%), use odds-based estimate
+  if(g.tot<=0&&g.odds>0)g.tot=Math.round(totWinP*g.odds);
+  if(g.tot>0&&g.pr>0&&tpvp/(g.tot*g.pr)>0.95&&g.odds>0){
+    // tot is wrong (more prize $ than ticket revenue). Recalc from odds.
+    g.tot=Math.round(totWinP*g.odds);
+  }
+  if(g.pk<=0)g.pk=0; // truly unknown, don't guess
+  
+  var complete=g.tot>0&&g.pk>0&&g.guar>0&&g.odds>0;
   var pc=g.pk>0&&g.tot>0?Math.round(g.tot/g.pk):0;
   
   // === DESIGNED RETURN ===
   // total_prize_value / (total_tickets × ticket_price)
-  // This is each game's own built-in return rate
-  var tpvp=0;for(i=0;i<g.pz.length;i++)tpvp+=g.pz[i].a*g.pz[i].p;
   var designedReturn=g.tot>0&&g.pr>0?tpvp/(g.tot*g.pr):0;
   
   // === BTP DETECTION (hybrid: ratio + floor) ===
@@ -237,24 +238,34 @@ function analyze(g){
   else if(coldV>hotV*2){gSig="AVOID";gRsn="Big prizes depleting faster than tickets.";}
   
   // === SCORING ===
-  // Derived from real signals, no arbitrary point tables
-  var signals=0,sigCount=0;
-  // 1. Return gap positive = remaining packs richer
-  if(returnGap>0.01){signals+=2;sigCount++}else if(returnGap<-0.01){signals-=1;sigCount++}else{sigCount++}
-  // 2. Top-tier hypergeometric better than launch
-  if(hyperRatio>1.1){signals+=2;sigCount++}else if(hyperRatio<0.9&&hyperRatio>0){signals-=1;sigCount++}else{sigCount++}
-  // 3. Markov velocity
-  if(gSig==="STRONG_BUY"){signals+=2;sigCount++}else if(gSig==="BUY"){signals+=1;sigCount++}else if(gSig==="AVOID"){signals-=2;sigCount++}else{sigCount++}
-  // 4. Top prizes still available
-  if(tpr>0){signals+=1;sigCount++}else{signals-=2;sigCount++}
-  // 5. Win odds improved vs published
-  if(winOdds<g.odds*0.95){signals+=1;sigCount++}else{sigCount++}
-  // 6. Not closing
-  if(!g.cs){signals+=1;sigCount++}else if(g.cs&&tpr>0){signals+=1;sigCount++}else{signals-=1;sigCount++}
+  // Continuous weighted signals, not binary. More granularity.
+  var sc=50; // baseline
   
-  // Score: normalize to 0-100
-  var maxSig=sigCount*2;
-  var sc=Math.round(Math.min(100,Math.max(0,((signals+maxSig)/(maxSig*2))*100)));
+  // 1. Return gap: -15 to +15 pts (strongest signal - direct measure of remaining value)
+  if(returnGap!==0)sc+=Math.max(-15,Math.min(15,returnGap*100));
+  
+  // 2. Top-tier hypergeometric vs launch: -10 to +10 pts
+  if(hyperRatio>0)sc+=Math.max(-10,Math.min(10,(hyperRatio-1)*20));
+  
+  // 3. Markov: -10 to +10 pts
+  if(hotV+coldV>0){var mkRatio=(hotV-coldV)/(hotV+coldV);sc+=mkRatio*10}
+  
+  // 4. Top prizes: -15 to +5 pts
+  if(tpr===0)sc-=15;else if(tp.p>0)sc+=Math.min(5,(tpr/tp.p)*5);
+  
+  // 5. Win odds shift: -5 to +5 pts
+  if(g.odds>0&&winOdds<Infinity){var oddsShift=(g.odds-winOdds)/g.odds;sc+=Math.max(-5,Math.min(5,oddsShift*20))}
+  
+  // 6. Closing penalty/bonus
+  if(g.cs&&tpr===0)sc-=10;else if(g.cs&&tpr>0)sc+=3;
+  
+  // 7. Remaining return vs designed: -5 to +5
+  if(designedReturn>0&&remainReturnPct>0){var retShift=(remainReturnPct-designedReturn)/designedReturn;sc+=Math.max(-5,Math.min(5,retShift*15))}
+  
+  // 8. Incomplete data penalty
+  if(!complete)sc-=5;
+  
+  sc=Math.round(Math.min(100,Math.max(0,sc)));
   
   // === TIER ADVANTAGE ===
   var tierAdv=[];
@@ -264,29 +275,11 @@ function analyze(g){
     var pctB=origO>0&&origO<Infinity?((origO-currO)/origO)*100:0;
     tierAdv.push({a:p.a,origO:origO,currO:currO,pctB:pctB,rem:trm,cat:tierCats[p.a]||"?"})}
   
-  // === BTP PACK SCENARIOS (binomial) ===
-  var btpScen=[];
-  if(at&&at.p>0){
-    var btpRem=R(at);
-    var pBTP=etr>0&&btpRem>0?btpRem/etr:0;
-    var fct=function(n){var r=1;for(var x=2;x<=n;x++)r*=x;return r};
-    var comb=function(n,k){return k>n?0:fct(n)/(fct(k)*fct(n-k))};
-    for(var k=0;k<=Math.min(4,g.pk);k++){
-      var prob2=comb(g.pk,k)*Math.pow(pBTP,k)*Math.pow(1-pBTP,g.pk-k);
-      if(k>2&&prob2<0.0001)break;
-      btpScen.push({count:k,prob:prob2,val:k*aa})}
-  }
-  
   // === PRIZES TABLE DATA ===
   var prizes=[];for(i=0;i<g.pz.length;i++){p=g.pz[i];var rm=R(p);
     prizes.push({a:p.a,p:p.p,c:p.c,rem:rm,pctC:p.p>0?(p.c/p.p*100):0,
       origO:g.tot>0?g.tot/p.p:Infinity,currO:etr>0&&rm>0?etr/rm:Infinity,
       isA:p.a===aa,isO:ai>=0&&i<ai,cat:tierCats[p.a]||"?"})}
-  
-  // === PACK OUTCOMES ===
-  var pko=[{label:"Base ($"+aa+")",val:g.guar||0,prob:Math.max(0,1-orpC)}];
-  for(i=0;i<ot.length;i++){var rm2=R(ot[i]);if(rm2<=0)continue;
-    pko.push({label:"$"+fN(ot[i].a),val:(g.guar||0)+(ot[i].a-aa),prob:epr>0?rm2/epr:0})}
   
   // === FLAGS ===
   var flags=[];
@@ -309,8 +302,8 @@ function analyze(g){
     tp:tp,tpr:tpr,tpo:tpo,mat:mat,sc:sc,
     winOdds:winOdds,totRem:totRem,
     hyperNow:hyperNow,hyperLaunch:hyperLaunch,hyperRatio:hyperRatio,
-    tpPack:tpPack,tierAdv:tierAdv,btpScen:btpScen,tierCats:tierCats,
-    prizes:prizes,pko:pko,gm:{ts:ts,sig:gSig,rsn:gRsn},flags:flags};
+    tpPack:tpPack,tierAdv:tierAdv,tierCats:tierCats,
+    prizes:prizes,gm:{ts:ts,sig:gSig,rsn:gRsn},flags:flags};
 }
 
 // === STATE ===
@@ -514,32 +507,106 @@ function render(){
       dm.forEach(function(m){o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:18px;font-weight:800;color:'+m.c+'">'+m.v+'</div>'+(m.s?'<div style="font-size:9px;color:var(--dim);margin-top:2px">'+m.s+'</div>':'')+'</div>';});
       o+='</div></div>';
       
-      // Prize pool bar chart
+      // === RETURN GAP GRAPH + TOP TIER DONUT ===
+      o+='<div class="C"><div style="display:flex;gap:16px;flex-wrap:wrap">';
+      
+      // LEFT: Return gap visual
+      o+='<div style="flex:1;min-width:200px">';
+      o+='<div class="L" style="margin-bottom:10px">RETURN GAP ANALYSIS</div>';
+      var drPct=sel.designedReturn>0?(sel.designedReturn*100):0;
+      var soldPct=sel.g.pr>0&&sel.ets>0?(sel.soldReturn/sel.g.pr*100):0;
+      var remPct=sel.remainReturnPct>0?(sel.remainReturnPct*100):0;
+      var maxBar=Math.max(drPct,soldPct,remPct,1);
+      // Designed return bar
+      o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+      o+='<div style="width:80px;text-align:right;font-size:10px;color:var(--dim);font-weight:600">DESIGNED</div>';
+      o+='<div style="flex:1;height:24px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
+      o+='<div style="width:'+(drPct/maxBar*100)+'%;height:100%;background:#5a6a7a;border-radius:4px"></div>';
+      o+='<span style="position:absolute;right:8px;top:4px;font-size:11px;color:#ccc;font-weight:600">'+drPct.toFixed(1)+'%</span></div></div>';
+      // Sold return bar
+      o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+      o+='<div style="width:80px;text-align:right;font-size:10px;color:var(--amb);font-weight:600">SOLD</div>';
+      o+='<div style="flex:1;height:24px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
+      o+='<div style="width:'+(soldPct/maxBar*100)+'%;height:100%;background:linear-gradient(90deg,#f39c12,#e67e22);border-radius:4px"></div>';
+      o+='<span style="position:absolute;right:8px;top:4px;font-size:11px;color:#fff;font-weight:600">'+soldPct.toFixed(1)+'%</span></div></div>';
+      // Remaining return bar
+      var remClr=remPct>drPct?"#2ecc71":"#e74c3c";
+      o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+      o+='<div style="width:80px;text-align:right;font-size:10px;color:'+remClr+';font-weight:600">REMAINING</div>';
+      o+='<div style="flex:1;height:24px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
+      o+='<div style="width:'+(remPct/maxBar*100)+'%;height:100%;background:linear-gradient(90deg,'+remClr+','+remClr+'cc);border-radius:4px"></div>';
+      o+='<span style="position:absolute;right:8px;top:4px;font-size:11px;color:#fff;font-weight:600">'+remPct.toFixed(1)+'%</span></div></div>';
+      // Gap callout
+      if(sel.returnGap!==0){
+        var gapClr=sel.returnGap>0?"#2ecc71":"#e74c3c";
+        o+='<div style="text-align:center;margin-top:4px;font-size:18px;font-weight:800;color:'+gapClr+'">'+(sel.returnGap>0?"+":"")+pct(sel.returnGap)+'</div>';
+        o+='<div style="text-align:center;font-size:10px;color:var(--dim)">'+(sel.returnGap>0?"Remaining packs return more than sold":"Remaining packs return less than sold")+'</div>';
+      }
+      o+='</div>';
+      
+      // RIGHT: Top tier donut (SVG)
+      o+='<div style="flex:0 0 180px;text-align:center">';
+      o+='<div class="L" style="margin-bottom:8px">TOP TIER vs PACKS</div>';
+      // Donut: top-tier prizes remaining / total remaining packs
+      var topRem2=0,topPrinted2=0;
+      sel.prizes.forEach(function(p){if(p.cat==="TOP"){topRem2+=p.rem;topPrinted2+=p.p}});
+      var topClaimed2=topPrinted2-topRem2;
+      // SVG donut
+      var r=65,cx=90,cy=90,sw=18;
+      var circ=2*Math.PI*r;
+      // Segments: claimed (red), remaining (green), empty packs (dark)
+      var topPct2=topPrinted2>0?topClaimed2/topPrinted2:0;
+      var remPct2=topPrinted2>0?topRem2/topPrinted2:0;
+      var dash1=circ*topPct2,gap1=circ*(1-topPct2);
+      var dash2=circ*remPct2,gap2=circ*(1-remPct2);
+      o+='<svg width="180" height="180" viewBox="0 0 180 180">';
+      // Background ring
+      o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#1a2332" stroke-width="'+sw+'"/>';
+      // Claimed segment
+      o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#e74c3c" stroke-width="'+sw+'" stroke-dasharray="'+dash1+' '+gap1+'" stroke-dashoffset="'+(circ*0.25)+'" stroke-linecap="round"/>';
+      // Remaining segment
+      o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#2ecc71" stroke-width="'+sw+'" stroke-dasharray="'+dash2+' '+gap2+'" stroke-dashoffset="'+(circ*0.25-dash1)+'" stroke-linecap="round"/>';
+      // Center text
+      o+='<text x="'+cx+'" y="'+(cy-8)+'" text-anchor="middle" fill="#2ecc71" font-size="22" font-weight="800">'+topRem2+'</text>';
+      o+='<text x="'+cx+'" y="'+(cy+8)+'" text-anchor="middle" fill="#8899aa" font-size="10">of '+topPrinted2+'</text>';
+      o+='<text x="'+cx+'" y="'+(cy+22)+'" text-anchor="middle" fill="#8899aa" font-size="9">TOP LEFT</text>';
+      o+='</svg>';
+      // Pack ratio
+      if(sel.epr>0&&topRem2>0){
+        var packRatio=Math.round(sel.epr/topRem2);
+        o+='<div style="font-size:12px;color:var(--wht);margin-top:4px;font-weight:700">1 in '+fN(packRatio)+' packs</div>';
+        o+='<div style="font-size:10px;color:var(--dim)">has a TOP tier prize</div>';
+      }else if(topRem2===0){
+        o+='<div style="font-size:12px;color:var(--red);margin-top:4px;font-weight:700">ALL CLAIMED</div>';
+      }
+      o+='</div>';
+      o+='</div></div>';
       o+='<div class="C"><div class="L" style="margin-bottom:10px">PRIZE POOL — CLAIMED vs REMAINING</div>';
       sel.prizes.forEach(function(p){
         var pctC=p.p>0?p.c/p.p*100:0;var pctR=100-pctC;
-        var catClr=p.cat==="TOP"?"var(--pur)":p.cat==="MID"?"var(--blu)":p.isA?"var(--grn)":"var(--dim)";
-        o+='<div class="bar-row"><div class="bar-label" style="color:'+catClr+'">$'+fN(p.a);
+        var clrMap={"TOP":"#9b59b6","MID":"#3498db","BTP":"#2ecc71","BELOW":"#5a6a7a"};
+        var clr=p.isA?"#2ecc71":clrMap[p.cat]||"#5a6a7a";
+        o+='<div class="bar-row"><div class="bar-label" style="color:'+clr+'">$'+fN(p.a);
         if(p.isA)o+=' <span style="font-size:7px;opacity:.7">BTP</span>';
         o+='</div><div class="bar-track">';
-        o+='<div style="width:'+pctC+'%;height:100%;background:'+catClr+';opacity:.2"></div>';
-        o+='<div style="width:'+pctR+'%;height:100%;background:'+catClr+';opacity:.5"></div>';
+        o+='<div style="width:'+pctC+'%;height:100%;background:'+clr+';opacity:.25"></div>';
+        o+='<div style="width:'+pctR+'%;height:100%;background:'+clr+';opacity:.7"></div>';
         o+='<div class="bar-pct">'+fN(p.rem)+' left ('+pctR.toFixed(0)+'%)</div></div></div>';
       });
-      o+='<div style="margin-top:6px;font-size:10px;color:var(--dim)"><span class="g">Green</span>=BTP · <span class="p">Purple</span>=TOP · <span class="b">Blue</span>=MID · Dark=claimed · Light=remaining</div></div>';
+      o+='<div style="margin-top:6px;font-size:10px;color:var(--dim)"><span style="color:#2ecc71">■</span> BTP · <span style="color:#9b59b6">■</span> TOP · <span style="color:#3498db">■</span> MID · Dark=claimed · Bright=remaining</div></div>';
       
       // Markov velocity
       if(sel.gm.ts.length>0){
         o+='<div class="C"><div class="L" style="margin-bottom:8px">MARKOV VELOCITY — <span style="color:'+(sel.gm.sig.indexOf("BUY")>=0?"var(--grn)":sel.gm.sig==="AVOID"?"var(--red)":"var(--dim)")+'">'+sel.gm.sig.replace("_"," ")+'</span></div>';
         o+='<div style="font-size:11px;color:var(--text);margin-bottom:10px">'+esc(sel.gm.rsn)+'</div>';
         sel.gm.ts.forEach(function(t){
-          var tc=t.sig==="HOT"?"var(--grn)":t.sig==="COLD"?"var(--red)":"var(--dim)";
+          var tc=t.sig==="HOT"?"#2ecc71":t.sig==="COLD"?"#e74c3c":"#5a6a7a";
           o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">';
           o+='<span style="width:70px;text-align:right;font-weight:600;font-size:11px;color:var(--wht)">$'+fN(t.a)+'</span>';
           o+='<span style="width:30px;font-size:8px;color:var(--dim)">'+t.cat+'</span>';
-          o+='<div style="flex:1;height:18px;background:var(--bg);border-radius:3px;overflow:hidden;position:relative">';
-          o+='<div style="width:'+Math.min(100,Math.max(2,t.ar*100))+'%;height:100%;background:'+tc+';opacity:.4;border-radius:3px"></div>';
-          o+='<div style="position:absolute;left:'+Math.min(95,Math.max(0,t.er*100))+'%;top:0;width:2px;height:100%;background:var(--amb)"></div></div>';
+          o+='<div style="flex:1;height:20px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
+          o+='<div style="width:'+Math.min(100,Math.max(2,t.ar*100))+'%;height:100%;background:'+tc+';opacity:.65;border-radius:4px"></div>';
+          o+='<div style="position:absolute;left:'+Math.min(95,Math.max(0,t.er*100))+'%;top:0;width:2px;height:100%;background:#f39c12"></div></div>';
           o+='<span style="width:50px;font-size:10px;font-weight:700;color:'+tc+'">'+(t.sig==="HOT"?"HOT":t.sig==="COLD"?"COLD":"—")+'</span></div>';
         });
         o+='<div style="font-size:10px;color:var(--dim);margin-top:6px">Bar=actual claim rate · Yellow line=expected (BTP rate) · HOT=underclaimed (good)</div></div>';
@@ -560,20 +627,29 @@ function render(){
         o+='</div>';
       }
       
-      // BTP scenarios
-      if(sel.btpScen.length>0){
-        o+='<div class="C"><div class="L" style="margin-bottom:8px">BTP PACK SCENARIOS — $'+fN(sel.aa)+' PER HIT</div>';
-        sel.btpScen.forEach(function(s){
-          var w=Math.min(100,s.prob*100);
-          var clr=s.count===0?"var(--red)":s.count===1?"var(--blu)":"var(--grn)";
-          o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">';
-          o+='<div style="width:40px;text-align:right;font-weight:700;font-size:13px;color:'+clr+'">'+s.count+'x</div>';
-          o+='<div style="flex:1;height:20px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
-          o+='<div style="width:'+w+'%;height:100%;background:'+clr+';opacity:.4;border-radius:4px;min-width:'+(w>0?"3px":"0")+'"></div>';
-          o+='<span style="position:absolute;right:6px;top:2px;font-size:10px;color:var(--wht);font-weight:600">'+pct(s.prob)+'</span></div>';
-          o+='<div style="width:60px;font-size:11px;color:var(--dim)">$'+fN(s.val)+'</div></div>';
-        });
-        o+='</div>';
+      // Above vs Below BTP
+      if(sel.abvPct>0||sel.blwPct>0){
+        o+='<div class="C"><div class="L" style="margin-bottom:10px">ABOVE vs BELOW BTP — POOL HEALTH</div>';
+        var matW=sel.mat*100;
+        // Above BTP bar
+        o+='<div style="margin-bottom:10px"><div style="font-size:10px;color:var(--pur);font-weight:600;margin-bottom:4px">ABOVE BTP — outlier prizes (what you want)</div>';
+        o+='<div style="height:26px;background:var(--bg);border-radius:5px;overflow:hidden;position:relative">';
+        o+='<div style="width:'+(sel.abvPct*100)+'%;height:100%;background:linear-gradient(90deg,#9b59b6,#8e44ad);border-radius:5px"></div>';
+        o+='<div style="position:absolute;left:'+matW+'%;top:0;width:2px;height:100%;background:#f39c12"></div>';
+        o+='<span style="position:absolute;right:8px;top:5px;font-size:11px;color:#fff;font-weight:700">'+(sel.abvPct*100).toFixed(1)+'% claimed</span></div></div>';
+        // Below BTP bar
+        o+='<div style="margin-bottom:8px"><div style="font-size:10px;color:var(--blu);font-weight:600;margin-bottom:4px">BELOW BTP — base prizes (expected sales pace)</div>';
+        o+='<div style="height:26px;background:var(--bg);border-radius:5px;overflow:hidden;position:relative">';
+        o+='<div style="width:'+(sel.blwPct*100)+'%;height:100%;background:linear-gradient(90deg,#3498db,#2980b9);border-radius:5px"></div>';
+        o+='<div style="position:absolute;left:'+matW+'%;top:0;width:2px;height:100%;background:#f39c12"></div>';
+        o+='<span style="position:absolute;right:8px;top:5px;font-size:11px;color:#fff;font-weight:700">'+(sel.blwPct*100).toFixed(1)+'% claimed</span></div></div>';
+        // Interpretation
+        o+='<div style="font-size:11px;color:var(--text);padding:8px 10px;background:var(--bg);border-radius:6px">';
+        o+='<span style="color:#f39c12;font-weight:600">Yellow line</span> = game maturity ('+matW.toFixed(1)+'% sold). ';
+        if(sel.abvPct<sel.mat*0.85)o+='<span style="color:var(--grn);font-weight:600">Outlier prizes lagging behind sales — remaining packs are enriched.</span>';
+        else if(sel.abvPct>sel.mat*1.15)o+='<span style="color:var(--red);font-weight:600">Outlier prizes claimed faster than sales — remaining packs depleted.</span>';
+        else o+='<span style="color:var(--dim)">Claims tracking near expected pace.</span>';
+        o+='</div></div>';
       }
       
       // Prize table
@@ -723,6 +799,8 @@ function render(){
         o+='<div class="C"><div class="L" style="margin-bottom:8px">HISTORY</div>';
         S.sessions.forEach(function(s){var pl=s.w-s.s;
           o+='<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1e2d3d20"><div><div style="font-size:12px;color:var(--wht)">'+esc(s.g)+'</div><div style="font-size:10px;color:var(--dim)">'+s.t+' tk · '+s.d+'</div></div><div style="font-size:14px;font-weight:700;color:'+(pl>=0?"var(--grn)":"var(--red)")+'">'+(pl>=0?"+":"")+'$'+pl+'</div></div>';});
+        if(S.sessions.length>=2){var avgLoss=0;S.sessions.forEach(function(s){avgLoss+=s.s-s.w});avgLoss/=S.sessions.length;var remBR=S.bankroll-tss+tsw;var sessLeft=avgLoss>0?Math.floor(remBR/avgLoss):999;
+          o+='<div style="margin-top:12px;padding:10px 12px;background:var(--bg);border-radius:8px"><div class="L" style="color:var(--amb)">BURN RATE</div><div style="font-size:12px;color:var(--text);margin-top:6px">Avg loss/session: <strong style="color:var(--red)">$'+avgLoss.toFixed(0)+'</strong> · Sessions left: <strong style="color:'+(sessLeft<5?"var(--red)":"var(--amb)")+'">'+sessLeft+'</strong>'+(sessLeft<5?' · <strong style="color:var(--red)">LOW RUNWAY</strong>':'')+'</div></div>';}
         o+='<div class="B rn" style="margin-top:10px" onclick="clearSess()">Clear</div></div>';
       }
     }
