@@ -129,9 +129,9 @@ function analyze(g){
   var ai=g.pz.findIndex(function(p){return p.a===aa}),at=ai>=0?g.pz[ai]:null;
   var acr=at&&at.p>0?at.c/at.p:0;
   var eps=Math.round(pc*acr),epr=pc-eps,ets=eps*g.pk,etr=g.tot-ets;
-  // Safety: recalculate tot if prize data exceeds it
+  // Estimate tot only if not set (0 means no data from detail page yet)
   var totWinP=0;for(i=0;i<g.pz.length;i++)totWinP+=g.pz[i].p;
-  if(totWinP*g.odds>g.tot&&g.odds>1)g.tot=Math.round(totWinP*g.odds);
+  if(g.tot<=0&&g.odds>1)g.tot=Math.round(totWinP*g.odds);
   etr=Math.max(0,g.tot-ets);epr=Math.max(1,epr);
   var tpvp=0,tpvc=0;for(i=0;i<g.pz.length;i++){tpvp+=g.pz[i].a*g.pz[i].p;tpvc+=g.pz[i].a*g.pz[i].c}
   var tpvr=tpvp-tpvc;
@@ -267,12 +267,8 @@ async function refreshAllData(){
           if(ng.pk>0)ex.pk=ng.pk;
           if(ng.guar>0)ex.guar=ng.guar;
           if(ng.odds>0)ex.odds=ng.odds;
-          // Update prize tiers
-          ng.pz.forEach(function(np){
-            var ep=ex.pz.find(function(p){return p.a===np.a});
-            if(ep){ep.c=np.c;if(np.p>0)ep.p=np.p;updated++}
-            else{ex.pz.push({a:np.a,p:np.p,c:np.c});ex.pz.sort(function(a,b){return b.a-a.a});updated++}
-          });
+          // Replace prize tiers entirely — CSV is ground truth
+          ex.pz=ng.pz.slice();ex.pz.sort(function(a,b){return b.a-a.a});updated+=ng.pz.length;
         }
         if(!ex&&ng.pz&&ng.pz.length>0&&ng.pr>0){
           ng.id=String(ng.gn);
@@ -394,7 +390,7 @@ try{
     if(sg&&sg.length>0){
       sg.forEach(function(ng){
         var ex=GD.find(function(g){return g.gn===ng.gn});
-        if(ex&&ng.pz){ng.pz.forEach(function(np){var ep=ex.pz.find(function(p){return p.a===np.a});if(ep)ep.c=np.c});if(ng.tot&&ng.tot>ex.tot)ex.tot=ng.tot;if(ng.pk&&ng.pk>0)ex.pk=ng.pk;if(ng.guar&&ng.guar>0)ex.guar=ng.guar;if(ng.odds&&ng.odds>0)ex.odds=ng.odds;}
+        if(ex&&ng.pz&&ng.pz.length>0){ex.pz=ng.pz.slice();ex.pz.sort(function(a,b){return b.a-a.a});if(ng.tot&&ng.tot>0)ex.tot=ng.tot;if(ng.pk&&ng.pk>0)ex.pk=ng.pk;if(ng.guar&&ng.guar>0)ex.guar=ng.guar;if(ng.odds&&ng.odds>0)ex.odds=ng.odds;if(ng.pr&&ng.pr>0)ex.pr=ng.pr;if(ng.nm)ex.nm=ng.nm;if(ng.cs!==undefined)ex.cs=ng.cs;}
       });
     }
   }
