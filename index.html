@@ -343,7 +343,6 @@ function analyze(g){
 var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pack",
   pack:{log:[],won:0,spent:0,af:false,pr:10,pk:50,nm:"",aa:100,ew:13},
   sessions:JSON.parse(localStorage.getItem("txs6")||"[]"),
-  _aiLoading:false,_aiBriefing:null,
   bankroll:Number(localStorage.getItem("txb6")||"1000")};
 
 // === INIT: auto-fetch, no hardcoded data ===
@@ -415,32 +414,74 @@ async function fetchWinners(){
   S._fetching=false;render();
 }
 
-// === LLM INTELLIGENCE BRIEFING ===
-async function runAIBriefing(){
-  if(S._aiLoading||!S.data.length)return;
-  S._aiLoading=true;S._aiBriefing=null;render();
-  
-  // Filter: only games with significant top-tier signals
+// === PACK TRACKER ===
+function scratch(amt){var pk=S.pack;pk.log.push({amt:amt,w:amt>0});pk.won+=amt;pk.spent+=pk.pr;pk.af=pk.af||amt>=pk.aa;render()}
+function resetPack(){S.pack.log=[];S.pack.won=0;S.pack.spent=0;S.pack.af=false;render()}
+function saveSession(){if(!S.pack.log.length)return;S.sessions.push({g:S.pack.nm,s:S.pack.spent,w:S.pack.won,t:S.pack.log.length,d:new Date().toLocaleDateString(),af:S.pack.af});localStorage.setItem("txs6",JSON.stringify(S.sessions));resetPack()}
+function clearSess(){S.sessions=[];localStorage.setItem("txs6","[]");render()}
+function setBR(v){S.bankroll=v;localStorage.setItem("txb6",String(v));render()}
+function startPack(id){var a;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;S.pack={log:[],won:0,spent:0,af:false,pr:a.g.pr,pk:a.g.pk,nm:a.g.nm+' #'+a.g.gn,aa:a.aa,ew:Math.round(a.g.pk/a.g.odds)};S.tab="more";S.moreTab="pack";render()}
+
+// === AI PROMPT GENERATORS ===
+function buildGamePrompt(a){
+  var lines=[];
+  lines.push("Analyze this Texas scratch-off game and tell me if it's worth buying. Focus on whether top-tier prizes are more likely to be in remaining packs than normal.\n");
+  lines.push("GAME: "+a.g.nm+" #"+a.g.gn+" ($"+a.g.pr+" ticket)");
+  lines.push("Pack: "+a.g.pk+" tickets/pack = $"+(a.g.pk*a.g.pr)+" per pack");
+  if(a.g.guar)lines.push("Guaranteed floor: $"+a.g.guar+" per pack");
+  if(a.g.odds)lines.push("Published odds: 1 in "+a.g.odds);
+  lines.push("");
+  lines.push("CURRENT STATUS:");
+  lines.push("Score: "+a.sc+"/100");
+  lines.push("Maturity: "+(a.mat*100).toFixed(1)+"% of tickets sold ("+fN(a.ets)+" of "+fN(a.g.tot)+")");
+  lines.push("Packs remaining: ~"+fN(a.epr));
+  lines.push("BTP (base ticket prize): $"+fN(a.aa)+" — claim rate: "+(a.acr*100).toFixed(1)+"%");
+  if(a.btpValid)lines.push("BTP validated against designed return");
+  lines.push("");
+  lines.push("KEY SIGNALS:");
+  lines.push("Designed return: "+(a.designedReturn*100).toFixed(1)+"% (built into game)");
+  lines.push("Remaining return: "+(a.remainReturnPct*100).toFixed(1)+"% (current per-ticket return of unsold tickets)");
+  lines.push("Return gap: "+(a.returnGap>0?"+":"")+(a.returnGap*100).toFixed(1)+"% — "+(a.returnGap>0?"remaining packs richer than sold":"remaining packs poorer than sold"));
+  lines.push("Markov signal: "+a.gm.sig+" — "+a.gm.rsn);
+  lines.push("Top-tier hypergeometric: "+a.hyperRatio.toFixed(2)+"x vs launch"+(a.hyperRatio>1?" (better odds now)":a.hyperRatio<1?" (worse odds now)":" (unchanged)"));
+  lines.push("Win odds now: 1:"+Math.round(a.winOdds)+(a.g.odds?" (published: 1:"+a.g.odds+")":""));
+  lines.push("");
+  lines.push("PRIZE TIERS (above BTP):");
+  a.prizes.filter(function(p){return p.isO||p.cat==="TOP"||p.cat==="MID"}).forEach(function(p){
+    var cr=p.p>0?(p.c/p.p*100).toFixed(1):0;
+    lines.push("  $"+fN(p.a)+" ["+p.cat+"] — "+fN(p.rem)+" of "+fN(p.p)+" left ("+(100-p.pctC).toFixed(0)+"%) — claim rate: "+cr+"% vs BTP: "+(a.acr*100).toFixed(1)+"% → "+(parseFloat(cr)<a.acr*100?"UNDERCLAIMED":"OVERCLAIMED"));
+  });
+  lines.push("");
+  lines.push("TOP PRIZE: $"+fN(a.tp.a)+" — "+a.tpr+" of "+a.tp.p+" remaining");
+  if(a.epr>0&&a.tpr>0)lines.push("Top prize density: 1 in "+fN(Math.round(a.epr/a.tpr))+" remaining packs");
+  if(a.g.cs)lines.push("⚠ GAME IS CLOSING");
+  lines.push("");
+  lines.push("QUESTION: Based on this data, is this game a good buy? Are the top-tier prizes ($"+fN(a.tp.a)+") more concentrated in remaining packs than at launch? What's the key factor in your recommendation?");
+  return lines.join("\n");
+}
+
+function buildAllPrompt(){
   var triggered=[];
   S.data.forEach(function(a){
     if(!a.complete)return;
-    var reasons=[];
-    if(a.hyperRatio>1.1)reasons.push("top-tier odds "+a.hyperRatio.toFixed(2)+"x vs launch");
-    if(a.returnGap>0.03)reasons.push("gap +"+(a.returnGap*100).toFixed(1)+"%");
-    if(a.tpr===a.tp.p&&a.mat>0.2)reasons.push("all top prizes intact at "+(a.mat*100).toFixed(0)+"% sold");
-    if(a.g.cs&&a.tpr>0)reasons.push("closing with "+a.tpr+" top prizes");
-    if((a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY")&&a.tpr>0)reasons.push("Markov "+a.gm.sig);
-    if(reasons.length>0)triggered.push(a);
+    var dominated=false;
+    if(a.hyperRatio>1.1||a.returnGap>0.03||(a.tpr===a.tp.p&&a.mat>0.2)||(a.g.cs&&a.tpr>0)||((a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY")&&a.tpr>0))dominated=true;
+    if(a.gm.sig==="AVOID"||a.gm.sig==="DEAD"||a.returnGap<-0.03)dominated=true;
+    if(dominated)triggered.push(a);
   });
+  if(triggered.length===0)return"No games with significant signals to analyze.";
   
-  if(triggered.length===0){
-    S._aiBriefing="No games currently showing significant top-tier signals. All games are tracking near expected claim rates.";
-    S._aiLoading=false;render();return;
-  }
-  
-  // Build compact data table for triggered games
-  var lines=triggered.map(function(a){
-    return "#"+a.g.gn+" "+a.g.nm+" $"+a.g.pr+
+  var lines=[];
+  lines.push("You are a Texas scratch-off analyst. Analyze this data and give me actionable insights. Focus on which games have top-tier prizes that are more likely to be in remaining packs than expected.\n");
+  lines.push("METRICS:");
+  lines.push("- gap: return gap. Positive = remaining packs return more per dollar than sold packs (good)");
+  lines.push("- markov: BUY/STRONG_BUY = top prizes underclaimed. AVOID = top prizes depleting fast. DEAD = all top gone.");
+  lines.push("- top: remaining/total top prizes and value");
+  lines.push("- hyper: odds ratio vs launch. >1.0 = better odds now");
+  lines.push("- design/remain: built-in return vs current remaining return\n");
+  lines.push("DATA ("+triggered.length+" games with signals):\n");
+  triggered.sort(function(a,b){return b.sc-a.sc}).forEach(function(a){
+    lines.push("#"+a.g.gn+" "+a.g.nm+" $"+a.g.pr+
       " | score:"+a.sc+
       " | gap:"+(a.returnGap>0?"+":"")+(a.returnGap*100).toFixed(1)+"%"+
       " | markov:"+a.gm.sig+
@@ -449,78 +490,34 @@ async function runAIBriefing(){
       " | hyper:"+a.hyperRatio.toFixed(2)+"x"+
       " | design:"+(a.designedReturn*100).toFixed(1)+"%"+
       " | remain:"+(a.remainReturnPct*100).toFixed(1)+"%"+
-      " | packs_left:"+fN(a.epr)+
-      (a.g.cs?" | CLOSING":"");
+      " | packs:"+fN(a.epr)+
+      (a.g.cs?" | CLOSING":""));
   });
-  
-  // Also include best per price and games to avoid for context
-  var byP={};S.data.forEach(function(a){if(a.complete&&(!byP[a.g.pr]||a.sc>byP[a.g.pr].sc))byP[a.g.pr]=a});
-  var avoids=S.data.filter(function(a){return a.complete&&(a.gm.sig==="AVOID"||a.gm.sig==="DEAD"||a.returnGap<-0.03)});
-  
-  var sysPrompt="You are a Texas scratch-off analyst. You study publicly available prize claim data to identify which games currently have favorable conditions for top-tier prizes.\n\n"+
-    "METRICS EXPLAINED:\n"+
-    "- score: 0-100 composite (higher=better)\n"+
-    "- gap: return gap. Positive = remaining unsold packs return more per dollar than already-sold packs (good). Negative = remaining packs are poorer.\n"+
-    "- markov: BUY/STRONG_BUY = top-tier prizes underclaimed vs ticket sales pace. AVOID = top prizes depleting fast. NEUTRAL = no clear signal.\n"+
-    "- top: remaining/total top-tier prizes and their value\n"+
-    "- hyper: hypergeometric ratio vs launch. >1.0 means your odds of getting a top-tier prize in a pack are BETTER now than at launch.\n"+
-    "- design: the game's built-in return rate. remain: current per-ticket return rate of unsold tickets.\n"+
-    "- packs_left: remaining packs available\n\n"+
-    "YOUR JOB:\n"+
-    "1. Identify the 2-3 BEST games to buy right now and why (focus on top-tier prize probability)\n"+
-    "2. Flag any unusual patterns across games (cross-price trends, closing opportunities)\n"+
-    "3. Call out 1-2 games to AVOID and why\n"+
-    "4. If a game at a specific price point clearly dominates others at that price, say so\n\n"+
-    "RULES:\n"+
-    "- Be specific with numbers. Don't be vague.\n"+
-    "- Focus on top-tier prize availability vs remaining packs — that's what matters.\n"+
-    "- Short, direct sentences. No filler. No disclaimers about gambling.\n"+
-    "- 200 words max.";
-  
-  var userMsg="Today's data ("+new Date().toLocaleDateString()+"). "+triggered.length+" games flagged with significant signals:\n\n"+
-    lines.join("\n");
-  
-  if(avoids.length>0){
-    userMsg+="\n\nGames showing negative signals:\n";
-    avoids.slice(0,5).forEach(function(a){
-      userMsg+="#"+a.g.gn+" "+a.g.nm+" $"+a.g.pr+" | gap:"+(a.returnGap*100).toFixed(1)+"% | markov:"+a.gm.sig+" | top:"+a.tpr+"/"+a.tp.p+"\n";
-    });
-  }
-  
-  try{
-    var apiKey=localStorage.getItem("txr_apikey")||"";
-    var headers={"Content-Type":"application/json","anthropic-version":"2023-06-01"};
-    if(apiKey)headers["x-api-key"]=apiKey;
-    var resp=await fetch("https://api.anthropic.com/v1/messages",{
-      method:"POST",
-      headers:headers,
-      body:JSON.stringify({
-        model:"claude-sonnet-4-20250514",
-        max_tokens:1000,
-        system:sysPrompt,
-        messages:[{role:"user",content:userMsg}]
-      })
-    });
-    var data=await resp.json();
-    if(data&&data.content){
-      var text=data.content.map(function(b){return b.text||""}).join("\n").trim();
-      S._aiBriefing=text;
-    }else{
-      S._aiBriefing="Analysis unavailable. API response: "+(data.error?data.error.message:"unknown error");
-    }
-  }catch(e){
-    S._aiBriefing="Analysis unavailable: "+e.message;
-  }
-  S._aiLoading=false;render();
+  lines.push("\nQUESTIONS:");
+  lines.push("1. What are the top 2-3 games to buy right now and why?");
+  lines.push("2. Any unusual cross-game patterns?");
+  lines.push("3. Which 1-2 games should I avoid?");
+  lines.push("4. Best pick at each price point ($1, $2, $3, $5, $10, $20, $30, $50, $100)?");
+  return lines.join("\n");
 }
 
-// === PACK TRACKER ===
-function scratch(amt){var pk=S.pack;pk.log.push({amt:amt,w:amt>0});pk.won+=amt;pk.spent+=pk.pr;pk.af=pk.af||amt>=pk.aa;render()}
-function resetPack(){S.pack.log=[];S.pack.won=0;S.pack.spent=0;S.pack.af=false;render()}
-function saveSession(){if(!S.pack.log.length)return;S.sessions.push({g:S.pack.nm,s:S.pack.spent,w:S.pack.won,t:S.pack.log.length,d:new Date().toLocaleDateString(),af:S.pack.af});localStorage.setItem("txs6",JSON.stringify(S.sessions));resetPack()}
-function clearSess(){S.sessions=[];localStorage.setItem("txs6","[]");render()}
-function setBR(v){S.bankroll=v;localStorage.setItem("txb6",String(v));render()}
-function startPack(id){var a;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;S.pack={log:[],won:0,spent:0,af:false,pr:a.g.pr,pk:a.g.pk,nm:a.g.nm+' #'+a.g.gn,aa:a.aa,ew:Math.round(a.g.pk/a.g.odds)};S.tab="more";S.moreTab="pack";render()}
+function copyAIPrompt(id){
+  var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}
+  if(!a)return;
+  var prompt=buildGamePrompt(a);
+  navigator.clipboard.writeText(prompt).then(function(){
+    var btn=event.target;btn.textContent="✓ Copied!";btn.style.color="var(--grn)";btn.style.borderColor="var(--grn)";
+    setTimeout(function(){btn.textContent="📋 Copy AI Prompt";btn.style.color="#9b59b6";btn.style.borderColor="#9b59b6"},2000);
+  });
+}
+
+function copyAllPrompt(){
+  var prompt=buildAllPrompt();
+  navigator.clipboard.writeText(prompt).then(function(){
+    var btn=event.target;btn.textContent="✓ Copied!";btn.style.color="var(--grn)";btn.style.borderColor="var(--grn)";
+    setTimeout(function(){btn.textContent="📋 Copy All-Games Prompt";btn.style.color="#9b59b6";btn.style.borderColor="#9b59b6"},2000);
+  });
+}
 function mkv(){var pk=S.pack,rem=pk.pk-pk.log.length;if(rem<=0)return null;var wf=0;for(var i=0;i<pk.log.length;i++)if(pk.log[i].w)wf++;var wl=Math.max(0,pk.ew-wf),pW=wl/rem,pA=pk.af?0:1/rem;var dec="EARLY",rsn="Pack is early — "+(pA*100).toFixed(1)+"% per ticket.";if(pk.af){dec="STOP";rsn="Anchor found. Remaining are small winners/losers.";}else if(pA>=0.15){dec="BUY";rsn=(pA*100).toFixed(1)+"% chance anchor is next. Only "+rem+" left.";}else if(pA>=0.05){dec="CONSIDER";rsn=(pA*100).toFixed(1)+"% per ticket. "+rem+" remaining.";}return{rem:rem,wl:wl,pW:pW,pA:pA,dec:dec,rsn:rsn}}
 
 // === RENDER ===
@@ -813,48 +810,35 @@ function render(){
         });
         o+='</div>';
       }
-      o+='<div style="margin-top:4px"><div class="B on" onclick="startPack(\''+sel.g.id+'\')">Track Pack →</div></div>';
+      o+='<div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap"><div class="B on" onclick="startPack(\''+sel.g.id+'\')">Track Pack →</div>';
+      o+='<div class="B" style="border-color:#9b59b6;color:#9b59b6" onclick="copyAIPrompt(\''+sel.g.id+'\')">📋 Copy AI Prompt</div></div>';
     }
   }
 
   // === INSIGHTS (pattern detection + LLM briefing) ===
   if(S.tab==="insights"){
     
-    // === LLM INTELLIGENCE BRIEFING ===
+    // === AI PROMPT GENERATOR ===
     o+='<div class="C" style="border-color:#9b59b644"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div>';
-    o+='<div style="font-size:14px;font-weight:800;color:#9b59b6">🧠 INTELLIGENCE BRIEFING</div>';
-    o+='<div style="font-size:10px;color:var(--dim)">AI analysis of games with significant signals</div></div>';
-    o+='<div class="B'+(S._aiLoading?"":" on")+'" onclick="runAIBriefing()" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6">'+(S._aiLoading?'⏳ ANALYZING...':'RUN ANALYSIS')+'</div></div>';
-    // API key input
-    var storedKey=localStorage.getItem("txr_apikey")||"";
-    o+='<div style="margin-top:8px;display:flex;gap:6px;align-items:center">';
-    o+='<span style="font-size:9px;color:var(--dim);white-space:nowrap">API Key:</span>';
-    o+='<input type="password" id="apiKeyInput" value="'+esc(storedKey)+'" placeholder="sk-ant-..." class="I" style="flex:1;font-size:10px;padding:4px 8px" onchange="localStorage.setItem(\'txr_apikey\',this.value)">';
-    o+='</div>';
-    if(S._aiBriefing){
-      o+='<div style="margin-top:12px;font-size:13px;color:var(--text);line-height:1.7;white-space:pre-wrap">'+esc(S._aiBriefing)+'</div>';
-    }else if(!S._aiLoading){
-      // Show which games would be sent
-      var triggered=[];
-      S.data.forEach(function(a){
-        if(!a.complete)return;
-        var reasons=[];
-        if(a.hyperRatio>1.1)reasons.push("top-tier odds "+a.hyperRatio.toFixed(2)+"x vs launch");
-        if(a.returnGap>0.03)reasons.push("return gap +"+(a.returnGap*100).toFixed(1)+"%");
-        if(a.tpr===a.tp.p&&a.mat>0.2)reasons.push("all "+a.tpr+" top prizes intact at "+pct(a.mat)+" sold");
-        if(a.g.cs&&a.tpr>0)reasons.push("closing with "+a.tpr+" top prizes");
-        if((a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY")&&a.tpr>0)reasons.push("Markov "+a.gm.sig.replace("_"," "));
-        if(reasons.length>0)triggered.push({nm:a.g.nm,gn:a.g.gn,pr:a.g.pr,reasons:reasons});
-      });
-      o+='<div style="margin-top:10px;font-size:11px;color:var(--dim)">'+triggered.length+' games with significant signals will be analyzed:</div>';
-      if(triggered.length>0){
-        o+='<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">';
-        triggered.slice(0,15).forEach(function(t){o+='<span style="font-size:9px;padding:3px 8px;background:#9b59b618;border:1px solid #9b59b630;border-radius:4px;color:#9b59b6">'+esc(t.nm)+' $'+t.pr+'</span>'});
-        if(triggered.length>15)o+='<span style="font-size:9px;padding:3px 8px;color:var(--dim)">+'+((triggered.length-15))+' more</span>';
-        o+='</div>';
-      }else{
-        o+='<div style="margin-top:6px;font-size:12px;color:var(--amb)">No games currently showing significant top-tier signals.</div>';
-      }
+    o+='<div style="font-size:14px;font-weight:800;color:#9b59b6">🧠 AI ANALYSIS</div>';
+    o+='<div style="font-size:10px;color:var(--dim)">Generate a prompt with game data, paste into any AI chat</div></div>';
+    o+='<div class="B" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6" onclick="copyAllPrompt()">📋 Copy All-Games Prompt</div></div>';
+    // Show which games would be included
+    var triggered=[];
+    S.data.forEach(function(a){
+      if(!a.complete)return;
+      var dominated=false;
+      if(a.hyperRatio>1.1||a.returnGap>0.03||(a.tpr===a.tp.p&&a.mat>0.2)||(a.g.cs&&a.tpr>0)||((a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY")&&a.tpr>0))dominated=true;
+      if(a.gm.sig==="AVOID"||a.gm.sig==="DEAD"||a.returnGap<-0.03)dominated=true;
+      if(dominated)triggered.push(a);
+    });
+    o+='<div style="margin-top:8px;font-size:11px;color:var(--dim)">'+triggered.length+' games with significant signals included in prompt</div>';
+    if(triggered.length>0){
+      o+='<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">';
+      triggered.sort(function(a,b){return b.sc-a.sc}).slice(0,20).forEach(function(t){
+        o+='<span class="ck" onclick="openDetail(\''+t.g.id+'\')" style="font-size:9px;padding:3px 8px;background:#9b59b618;border:1px solid #9b59b630;border-radius:4px;color:#9b59b6;cursor:pointer">'+esc(t.g.nm)+' $'+t.g.pr+' ['+t.sc+']</span>'});
+      if(triggered.length>20)o+='<span style="font-size:9px;padding:3px 8px;color:var(--dim)">+'+(triggered.length-20)+' more</span>';
+      o+='</div>';
     }
     o+='</div>';
     
