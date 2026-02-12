@@ -339,6 +339,223 @@ function analyze(g){
     prizes:prizes,gm:{ts:ts,sig:gSig,rsn:gRsn},flags:flags};
 }
 
+// === PACK STRUCTURE ANALYSIS ===
+// Uses known facts (floor, odds, prize table) + AssumedPackYieldRange (observation: BTP packs return 65-75%)
+// Added as separate pass — does NOT modify analyze() outputs
+function analyzePackStructure(a){
+  var g=a.g,i,p;
+  if(!a.complete||a.pc<=0)return{valid:false,reason:"Incomplete data"};
+  
+  var packPrice=g.pk*g.pr;
+  if(packPrice<=0)return{valid:false,reason:"Missing pack price"};
+  
+  // === STEP 1: BTP ZONE DETECTION (dynamic, frequency-based) ===
+  // Calculate prizes-per-pack ratio for every tier
+  var tiers=[];
+  for(i=0;i<g.pz.length;i++){
+    p=g.pz[i];
+    var ratio=p.p/a.pc; // prizes per pack
+    var rem=p.p-p.c;
+    tiers.push({a:p.a,printed:p.p,claimed:p.c,rem:rem,ratio:ratio,idx:i});
+  }
+  
+  // Find Primary BTP: tier with ratio closest to 1.0 (must be ≥ 0.5)
+  var primaryBTP=null,bestDist=Infinity;
+  for(i=0;i<tiers.length;i++){
+    if(tiers[i].ratio<0.5)continue;
+    var dist=Math.abs(tiers[i].ratio-1.0);
+    if(dist<bestDist){bestDist=dist;primaryBTP=tiers[i];}
+  }
+  if(!primaryBTP)return{valid:false,reason:"Cannot detect Primary BTP"};
+  
+  // Build BTP zone: walk UP from Primary BTP
+  // Primary BTP: ratio ≥ 0.5 and closest to 1.0
+  // Secondary BTP: ratio ≥ 0.2 (1 in 5 packs)
+  // Mid-tier BTP: ratio ≥ 0.05 (1 in 20 packs)
+  // Above BTP: ratio < 0.05
+  var btpZone=[],aboveBTP=[];
+  var primaryIdx=primaryBTP.idx;
+  
+  // Everything at or below Primary BTP index is floor/BTP
+  for(i=g.pz.length-1;i>=0;i--){
+    var t=tiers[i];
+    if(i>primaryIdx){
+      // Below primary BTP = floor
+      t.role="FLOOR";
+      btpZone.push(t);
+    }else if(i===primaryIdx){
+      t.role="PRIMARY_BTP";
+      btpZone.push(t);
+    }else{
+      // Above primary BTP — check frequency
+      if(t.ratio>=0.2){
+        t.role="SECONDARY_BTP";
+        btpZone.push(t);
+      }else if(t.ratio>=0.05){
+        t.role="MID_BTP";
+        btpZone.push(t);
+      }else{
+        t.role="ABOVE_BTP";
+        aboveBTP.push(t);
+      }
+    }
+  }
+  
+  // Determine BTP type for this game
+  var btpType="SINGLE";
+  var secondaryCount=btpZone.filter(function(t){return t.role==="SECONDARY_BTP"}).length;
+  var midCount=btpZone.filter(function(t){return t.role==="MID_BTP"}).length;
+  if(secondaryCount>0&&midCount>0)btpType="TRIPLE";
+  else if(secondaryCount>0||midCount>0)btpType="DUAL";
+  
+  // BTP zone ceiling (highest tier in zone)
+  var zoneCeiling=primaryBTP.a;
+  for(i=0;i<btpZone.length;i++){if(btpZone[i].a>zoneCeiling&&btpZone[i].role!=="FLOOR")zoneCeiling=btpZone[i].a;}
+  
+  // === STEP 2: THREE-METHOD PACKS SOLD VALIDATION ===
+  // Method A: Primary BTP claim rate
+  var primaryCR=primaryBTP.printed>0?primaryBTP.claimed/primaryBTP.printed:0;
+  var methodA=Math.round(a.pc*primaryCR);
+  
+  // Method B: Total prizes claimed / expected winners per pack
+  var totalClaimed=0;
+  for(i=0;i<g.pz.length;i++)totalClaimed+=g.pz[i].c;
+  var winnersPerPack=g.odds>0?g.pk/g.odds:0;
+  var methodB=winnersPerPack>0?Math.round(totalClaimed/winnersPerPack):0;
+  
+  // Method C: Prize $ claimed / (pack price × AssumedPackYieldRange midpoint)
+  var dollarsClaimed=0;
+  for(i=0;i<g.pz.length;i++)dollarsClaimed+=g.pz[i].a*g.pz[i].c;
+  var yieldMidpoint=0.70; // center of AssumedPackYieldRange
+  var methodC=packPrice>0?Math.round(dollarsClaimed/(packPrice*yieldMidpoint)):0;
+  
+  // Confidence: how close are the three methods?
+  var methods=[methodA,methodB,methodC].filter(function(m){return m>0});
+  var packsSoldEst=methodA; // Primary BTP is our best clock
+  var confidence="LOW";
+  if(methods.length>=2){
+    var maxM=Math.max.apply(null,methods);
+    var minM=Math.min.apply(null,methods);
+    var spread=maxM>0?(maxM-minM)/maxM:1;
+    if(spread<=0.05)confidence="HIGH";
+    else if(spread<=0.10)confidence="MEDIUM";
+    else confidence="LOW";
+  }
+  var packsRemaining=Math.max(1,a.pc-packsSoldEst);
+  
+  // === STEP 3: ABOVE-BTP PACK COUNTING (exact) ===
+  // Each claimed above-BTP prize = one above-BTP pack sold
+  // Each remaining above-BTP prize = one above-BTP pack in remaining pool
+  var abvClaimed=0,abvRemaining=0,abvPrinted=0;
+  for(i=0;i<aboveBTP.length;i++){
+    abvClaimed+=aboveBTP[i].claimed;
+    abvRemaining+=aboveBTP[i].rem;
+    abvPrinted+=aboveBTP[i].printed;
+  }
+  var btpOnlyRemaining=Math.max(0,packsRemaining-abvRemaining);
+  
+  // === STEP 4: DENSITY SHIFT PER TIER ===
+  var densityShifts=[];
+  for(i=0;i<aboveBTP.length;i++){
+    var t=aboveBTP[i];
+    if(t.printed<=0)continue;
+    var launchDensity=t.printed/a.pc;
+    var currentDensity=t.rem>0?t.rem/packsRemaining:0;
+    var shift=launchDensity>0?currentDensity/launchDensity:0;
+    densityShifts.push({
+      a:t.a,
+      printed:t.printed,
+      remaining:t.rem,
+      launchOdds:Math.round(a.pc/t.printed),
+      currentOdds:t.rem>0?Math.round(packsRemaining/t.rem):Infinity,
+      shift:shift,
+      signal:shift>=1.5?"STRONG":shift>=1.2?"GOOD":shift>=0.9?"NEUTRAL":shift>=0.7?"WEAK":"DEPLETED"
+    });
+  }
+  
+  // Overall above-BTP density
+  var launchAbvDensity=a.pc>0?abvPrinted/a.pc:0;
+  var currentAbvDensity=packsRemaining>0?abvRemaining/packsRemaining:0;
+  var overallShift=launchAbvDensity>0?currentAbvDensity/launchAbvDensity:0;
+  
+  // Top tier density (highest value above-BTP tiers)
+  var topShift=densityShifts.length>0?densityShifts[0]:null; // highest $ tier
+  
+  // === STEP 5: AssumedPackYieldRange VALIDATION ===
+  // Check: BTP packs at ~70% yield × packs_sold + above-BTP pack values ≈ total claimed $?
+  var floorPct=g.guar>0?g.guar/packPrice:0;
+  var btpPacksSold=Math.max(0,packsSoldEst-abvClaimed);
+  var expectedBTPdollars=btpPacksSold*packPrice*yieldMidpoint;
+  
+  // Above-BTP packs: they also have BTP-level prizes + their above-BTP prize
+  var abvPrizeDollars=0;
+  for(i=0;i<aboveBTP.length;i++)abvPrizeDollars+=aboveBTP[i].a*aboveBTP[i].claimed;
+  var expectedAbvDollars=abvPrizeDollars+(abvClaimed*packPrice*yieldMidpoint);
+  
+  var expectedTotal=expectedBTPdollars+expectedAbvDollars;
+  var yieldValidation=dollarsClaimed>0?Math.abs(expectedTotal-dollarsClaimed)/dollarsClaimed:1;
+  var yieldValid=yieldValidation<=0.05;
+  
+  // === COMPOSITE SIGNAL ===
+  var signal="NEUTRAL",signalReason="";
+  if(topShift){
+    if(topShift.shift>=1.5&&confidence!=="LOW"){
+      signal="STRONG_BUY";
+      signalReason="Top prize "+topShift.shift.toFixed(1)+"x concentrated in remaining packs.";
+    }else if(topShift.shift>=1.2&&confidence!=="LOW"){
+      signal="BUY";
+      signalReason="Top prize "+topShift.shift.toFixed(1)+"x denser than at launch.";
+    }else if(topShift.shift<0.7){
+      signal="AVOID";
+      signalReason="Top prize depleted — "+topShift.shift.toFixed(1)+"x launch density.";
+    }else if(topShift.shift<0.9){
+      signal="WEAK";
+      signalReason="Top prize slightly depleted at "+topShift.shift.toFixed(1)+"x.";
+    }else{
+      signal="NEUTRAL";
+      signalReason="Top prize tracking near expected at "+topShift.shift.toFixed(1)+"x.";
+    }
+  }
+  // Maturity gate: if < 20% sold, signal is low confidence regardless
+  var maturity=a.pc>0?packsSoldEst/a.pc:0;
+  if(maturity<0.20&&(signal==="STRONG_BUY"||signal==="BUY")){
+    signal="EARLY";
+    signalReason="Only "+(maturity*100).toFixed(0)+"% sold — too early for reliable signal.";
+  }
+  
+  return{
+    valid:true,
+    // BTP Zone
+    btpType:btpType,
+    btpZone:btpZone.filter(function(t){return t.role!=="FLOOR"}).sort(function(a,b){return b.a-a.a}),
+    zoneCeiling:zoneCeiling,
+    primaryBTP:primaryBTP,
+    // Validation
+    methodA:methodA,methodB:methodB,methodC:methodC,
+    confidence:confidence,
+    packsSoldEst:packsSoldEst,
+    packsRemaining:packsRemaining,
+    // Above-BTP
+    aboveBTP:aboveBTP.sort(function(a,b){return b.a-a.a}),
+    abvPrinted:abvPrinted,
+    abvClaimed:abvClaimed,
+    abvRemaining:abvRemaining,
+    btpOnlyRemaining:btpOnlyRemaining,
+    // Density
+    densityShifts:densityShifts,
+    overallShift:overallShift,
+    topShift:topShift,
+    // Yield validation
+    floorPct:floorPct,
+    yieldValid:yieldValid,
+    yieldDelta:yieldValidation,
+    // Signal
+    signal:signal,
+    signalReason:signalReason,
+    maturity:maturity
+  };
+}
+
 // === STATE ===
 var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pack",
   pack:{log:[],won:0,spent:0,af:false,pr:10,pk:50,nm:"",aa:100,ew:13},
@@ -349,7 +566,7 @@ var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pac
 // === INIT: auto-fetch, no hardcoded data ===
 function init(){
   // Try cached data for instant render
-  try{var c=localStorage.getItem("txr_gd6");if(c){GD=JSON.parse(c);if(GD.length)S.data=GD.map(analyze)}}catch(e){}
+  try{var c=localStorage.getItem("txr_gd6");if(c){GD=JSON.parse(c);if(GD.length)S.data=GD.map(function(g){var a=analyze(g);a.ps=analyzePackStructure(a);return a;})}}catch(e){}
   DD=localStorage.getItem("txr_date6")||"";
   render();
   refreshAllData();
@@ -382,7 +599,7 @@ async function refreshAllData(){
         // Keep whatever the scraper provided — no fallback estimates
         GD.push(ng);
       });
-      S.data=GD.map(analyze);
+      S.data=GD.map(function(g){var a=analyze(g);a.ps=analyzePackStructure(a);return a;});
       DD=json.updated||"";
       localStorage.setItem("txr_date6",DD);
       localStorage.setItem("txr_gd6",JSON.stringify(GD));
@@ -427,6 +644,29 @@ function startPack(id){var a;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id==
 function buildGamePrompt(a){
   var lines=[];
   lines.push("Analyze this Texas scratch-off game and tell me if it's worth buying. Focus on whether top-tier prizes are more likely to be in remaining packs than normal.\n");
+  lines.push("HOW THIS DATA WORKS:");
+  lines.push("Texas lottery sells scratch-offs in packs (e.g. 50 tickets at $10 = $500 pack). Each pack has a guaranteed minimum prize total (floor). Texas publishes how many prizes at each level have been claimed.");
+  lines.push("");
+  lines.push("KEY CONCEPTS:");
+  lines.push("- BTP (Base Ticket Prize): The highest prize tier that appears roughly once per pack. This is the 'normal' best win in a typical pack. Some games have a BTP ZONE — multiple tiers that are all common enough to appear in normal packs:");
+  lines.push("  - PRIMARY BTP: ~1 per pack (e.g. $50 appearing 2.4x per pack)");
+  lines.push("  - SECONDARY BTP: ~1 in 5 packs (e.g. $100 in 42% of packs)");
+  lines.push("  - MID-TIER BTP: ~1 in 20 packs (e.g. $200 in 10% of packs)");
+  lines.push("  - SINGLE/DUAL/TRIPLE: how many BTP tiers this game has in its zone");
+  lines.push("- ABOVE-BTP: Prize tiers ABOVE the BTP zone. These are the outlier prizes that make a pack return more than normal. A pack with an above-BTP prize is the pack you want.");
+  lines.push("- AssumedPackYieldRange: A normal BTP-only pack (no above-BTP hit) returns between the guaranteed floor and ~70-75% of pack value. This is observed across many packs.");
+  lines.push("");
+  lines.push("METRICS:");
+  lines.push("- Guaranteed floor: Lottery-published minimum prize total per pack. The pack CANNOT return less than this.");
+  lines.push("- Designed return: Total prize value / total ticket revenue. The mathematical average return across ALL packs.");
+  lines.push("- Remaining return: Prize value left / remaining ticket value. What unsold tickets are currently worth per dollar.");
+  lines.push("- Return gap: (remaining return - sold return) / sold return. Positive = remaining packs have more prize value per dollar than already-sold packs. BUT this is driven by mid-range prizes, not top prizes.");
+  lines.push("- Density shift: (remaining prizes / remaining packs) / (printed prizes / total packs). This is the KEY metric. It tells you if a specific prize tier is MORE or LESS concentrated in remaining packs vs at launch. >1.0 = better odds. 1.5x = significantly better. <0.8 = depleted.");
+  lines.push("- Hypergeometric: Probability of getting at least 1 top-tier prize in a pack, calculated using hypergeometric distribution. The ratio vs launch tells you if odds improved.");
+  lines.push("- Markov signal: Compares each top tier's claim rate vs BTP claim rate. UNDERCLAIMED = prizes sitting in unsold packs. OVERCLAIMED = prizes pulled out disproportionately.");
+  lines.push("- Packs sold validation: Three independent methods estimate packs sold (BTP clock, prize count / winners per pack, prize dollars / yield). If all three agree within 5% = HIGH confidence the data is reliable.");
+  lines.push("- Confidence: HIGH = all 3 methods agree within 5%. MEDIUM = within 10%. LOW = disagree by >10%, signals may be unreliable.");
+  lines.push("");
   lines.push("GAME: "+a.g.nm+" #"+a.g.gn+" ($"+a.g.pr+" ticket)");
   lines.push("Pack: "+a.g.pk+" tickets/pack = $"+(a.g.pk*a.g.pr)+" per pack");
   if(a.g.guar)lines.push("Guaranteed floor: $"+a.g.guar+" per pack");
@@ -456,8 +696,37 @@ function buildGamePrompt(a){
   lines.push("TOP PRIZE: $"+fN(a.tp.a)+" — "+a.tpr+" of "+a.tp.p+" remaining");
   if(a.epr>0&&a.tpr>0)lines.push("Top prize density: 1 in "+fN(Math.round(a.epr/a.tpr))+" remaining packs");
   if(a.g.cs)lines.push("⚠ GAME IS CLOSING");
+  
+  // Pack structure data
+  if(a.ps&&a.ps.valid){
+    lines.push("");
+    lines.push("PACK STRUCTURE:");
+    lines.push("BTP Zone: "+a.ps.btpType+" — tiers: "+a.ps.btpZone.map(function(t){return"$"+fN(t.a)+" ("+t.role+", "+t.ratio.toFixed(2)+"/pack)"}).join(", "));
+    lines.push("Zone ceiling: $"+fN(a.ps.zoneCeiling)+" — everything above this is an outlier prize");
+    lines.push("Packs sold validation: BTP="+fN(a.ps.methodA)+" / PrizeCount="+fN(a.ps.methodB)+" / $Yield="+fN(a.ps.methodC)+" → Confidence: "+a.ps.confidence);
+    lines.push("Remaining packs: "+fN(a.ps.packsRemaining)+" ("+fN(a.ps.abvRemaining)+" have above-BTP prizes, "+fN(a.ps.btpOnlyRemaining)+" are BTP-only)");
+    if(a.ps.densityShifts.length>0){
+      lines.push("Density shifts (above-BTP, remaining vs launch):");
+      a.ps.densityShifts.forEach(function(d){
+        lines.push("  $"+fN(d.a)+": "+d.shift.toFixed(2)+"x ("+fN(d.remaining)+" left, 1:"+fN(d.currentOdds)+" packs vs launch 1:"+fN(d.launchOdds)+") → "+d.signal);
+      });
+    }
+    lines.push("Pack Structure Signal: "+a.ps.signal+" — "+a.ps.signalReason);
+  }
+  
+  // Flag contradictions so LLM pays attention
+  var contras=[];
+  if(a.returnGap>0.03&&a.hyperRatio<0.95)contras.push("Return gap is positive (+"+((a.returnGap*100).toFixed(1))+"%) but top-tier odds are worse than launch ("+a.hyperRatio.toFixed(2)+"x). This means dollar value is enriched but top prizes specifically may be depleted.");
+  if(a.returnGap<-0.03&&a.hyperRatio>1.05)contras.push("Return gap is negative but top-tier odds improved. Mid-range prizes are depleted but top prizes are concentrated.");
+  if((a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY")&&a.returnGap<-0.01)contras.push("Markov says "+a.gm.sig+" but return gap is negative — count-based signal disagrees with dollar-based reality.");
+  if(contras.length>0){lines.push("");lines.push("CONTRADICTIONS TO RESOLVE:");contras.forEach(function(c){lines.push("- "+c)});}
+  
   lines.push("");
-  lines.push("QUESTION: Based on this data, is this game a good buy? Are the top-tier prizes ($"+fN(a.tp.a)+") more concentrated in remaining packs than at launch? What's the key factor in your recommendation?");
+  lines.push("QUESTIONS:");
+  lines.push("1. Is this game a good buy right now? Give a clear YES/NO/MAYBE with confidence level.");
+  lines.push("2. Are the top-tier prizes ($"+fN(a.tp.a)+") more concentrated in remaining packs than at launch?");
+  lines.push("3. What's the single most important factor in your recommendation?");
+  lines.push("4. If I buy one pack ($"+(a.g.pk*a.g.pr)+"), what's my realistic expected outcome?");
   return lines.join("\n");
 }
 
@@ -475,22 +744,24 @@ function buildAllPrompt(){
   var lines=[];
   lines.push("You are a Texas scratch-off analyst. Analyze this data and give me actionable insights. Focus on which games have top-tier prizes that are more likely to be in remaining packs than expected.\n");
   lines.push("METRICS:");
-  lines.push("- gap: return gap. Positive = remaining packs return more per dollar than sold packs (good)");
-  lines.push("- markov: BUY/STRONG_BUY = top prizes underclaimed. AVOID = top prizes depleting fast. DEAD = all top gone.");
-  lines.push("- top: remaining/total top prizes and value");
-  lines.push("- hyper: odds ratio vs launch. >1.0 = better odds now");
-  lines.push("- design/remain: built-in return vs current remaining return\n");
+  lines.push("- density: top prize density shift vs launch. >1.0 = top prizes MORE concentrated in remaining packs. 1.5x+ = strong signal. <0.8 = depleted.");
+  lines.push("- gap: return gap. Positive = remaining packs return more $/ticket than sold packs. Driven mostly by mid-range prizes, not top prizes.");
+  lines.push("- markov: BUY/STRONG_BUY = top prizes underclaimed vs sales pace. AVOID = top prizes depleting faster than tickets selling. DEAD = all top gone.");
+  lines.push("- top: remaining/total top prizes and their value");
+  lines.push("- hyper: hypergeometric probability ratio of top-tier prize in a pack NOW vs at LAUNCH. >1.0 = better odds now.");
+  lines.push("- confidence: HIGH = three independent packs-sold estimates agree within 5% (BTP clock, prize count, dollar yield). MEDIUM = within 10%. LOW = unreliable.");
+  lines.push("- IMPORTANT: density shift is the most direct signal for 'are top prizes concentrated in fewer remaining packs'. Return gap tells you about average pack value. These can contradict — density can be >1.0 while gap is negative, or vice versa.\n");
   lines.push("DATA ("+triggered.length+" games with signals):\n");
   triggered.sort(function(a,b){return b.sc-a.sc}).forEach(function(a){
     lines.push("#"+a.g.gn+" "+a.g.nm+" $"+a.g.pr+
       " | score:"+a.sc+
+      " | density:"+(a.ps&&a.ps.valid&&a.ps.topShift?a.ps.topShift.shift.toFixed(2)+"x":"—")+
       " | gap:"+(a.returnGap>0?"+":"")+(a.returnGap*100).toFixed(1)+"%"+
       " | markov:"+a.gm.sig+
       " | top:"+a.tpr+"/"+a.tp.p+" ($"+fN(a.tp.a)+")"+
       " | sold:"+(a.mat*100).toFixed(1)+"%"+
       " | hyper:"+a.hyperRatio.toFixed(2)+"x"+
-      " | design:"+(a.designedReturn*100).toFixed(1)+"%"+
-      " | remain:"+(a.remainReturnPct*100).toFixed(1)+"%"+
+      " | confidence:"+(a.ps&&a.ps.valid?a.ps.confidence:"—")+
       " | packs:"+fN(a.epr)+
       (a.g.cs?" | CLOSING":""));
   });
@@ -556,6 +827,7 @@ function render(){
   if(S.filterPr!=="all")f=f.filter(function(a){return a.g.pr===Number(S.filterPr)});
   var sorts={
     score:function(a,b){return b.sc-a.sc},
+    density:function(a,b){var sa=a.ps&&a.ps.valid&&a.ps.topShift?a.ps.topShift.shift:0;var sb=b.ps&&b.ps.valid&&b.ps.topShift?b.ps.topShift.shift:0;return sb-sa},
     gap:function(a,b){return b.returnGap-a.returnGap},
     topOdds:function(a,b){return a.tpo-b.tpo},
     tickets:function(a,b){return a.mat-b.mat},
@@ -587,7 +859,7 @@ function render(){
     o+='<div class="FR"><span class="L" style="margin:0">PRICE:</span>';
     ["all"].concat(pArr).forEach(function(p){var v=String(p);o+='<div class="B'+(S.filterPr===v?" on":"")+'" onclick="setFilter(\''+v+'\')" style="padding:5px 10px">'+(v==="all"?"ALL":"$"+v)+'</div>';});
     o+='</div><div class="FR"><span class="L" style="margin:0">SORT:</span>';
-    [["score","Score"],["gap","Return Gap"],["topOdds","Top Odds"],["tickets","Freshest"],["hyper","Top Tier+"]].forEach(function(s){
+    [["score","Score"],["density","Density"],["gap","Return Gap"],["topOdds","Top Odds"],["tickets","Freshest"],["hyper","Top Tier+"]].forEach(function(s){
       o+='<div class="B'+(S.sortBy===s[0]?" bn":"")+'" onclick="setSort(\''+s[0]+'\')" style="padding:5px 10px">'+s[1]+'</div>';});
     o+='</div>';
     
@@ -603,7 +875,11 @@ function render(){
       o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+(a.sc>=65?"var(--grn)":a.sc>=40?"var(--amb)":"var(--red)")+';font-size:28px">'+a.sc+'</div><div style="font-size:9px;color:var(--dim)">SCORE</div></div></div>';
       
       // Key metrics row
+      var ps=a.ps||{};
+      var dsVal=ps.valid&&ps.topShift?ps.topShift.shift.toFixed(2)+"x":"—";
+      var dsClr=ps.valid&&ps.topShift?(ps.topShift.shift>=1.5?"g":ps.topShift.shift>=1.2?"g":ps.topShift.shift>=0.9?"d":ps.topShift.shift>=0.7?"a":"r"):"d";
       var ms=[
+        {l:"Density",v:dsVal,c:dsClr},
         {l:"Return Gap",v:a.returnGap!==0?(a.returnGap>0?"+":"")+pct(a.returnGap):"—",c:a.returnGap>0.01?"g":a.returnGap<-0.01?"r":"d"},
         {l:"Top Tier Odds",v:a.hyperRatio>0?a.hyperRatio.toFixed(2)+"x":"—",c:a.hyperRatio>1.1?"g":a.hyperRatio<0.9?"r":"d"},
         {l:"Markov",v:a.gm.sig.replace("_"," "),c:a.gm.sig==="STRONG_BUY"?"g":a.gm.sig==="BUY"?"g":a.gm.sig==="AVOID"?"r":a.gm.sig==="DEAD"?"r":a.gm.sig==="CAUTION"?"a":a.gm.sig==="MIXED"?"a":"d"},
@@ -611,7 +887,9 @@ function render(){
         {l:"Top Left",v:a.tpr+"/"+a.tp.p,c:a.tpr>0?"g":"r"},
         {l:"Sold",v:pct(a.mat),c:a.mat<0.5?"g":a.mat<0.8?"a":"r"},
         {l:"Designed Return",v:a.designedReturn>0?pct(a.designedReturn):"—",c:"d"},
-        {l:"Remaining Return",v:a.remainReturnPct>0?pct(a.remainReturnPct):"—",c:a.remainReturnPct>a.designedReturn?"g":a.remainReturnPct<a.designedReturn?"r":"d"}
+        {l:"Remaining Return",v:a.remainReturnPct>0?pct(a.remainReturnPct):"—",c:a.remainReturnPct>a.designedReturn?"g":a.remainReturnPct<a.designedReturn?"r":"d"},
+        {l:"Confidence",v:ps.valid?ps.confidence:"—",c:ps.valid?(ps.confidence==="HIGH"?"g":ps.confidence==="MEDIUM"?"a":"r"):"d"},
+        {l:"BTP Zone",v:ps.valid?ps.btpType:"—",c:ps.valid?(ps.btpType==="SINGLE"?"d":"b"):"d"}
       ];
       o+='<div class="G" style="grid-template-columns:repeat(auto-fit,minmax(90px,1fr));margin-top:10px">';
       ms.forEach(function(m){o+='<div><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:12px;font-weight:700" class="'+m.c+'">'+m.v+'</div></div>';});
@@ -666,6 +944,79 @@ function render(){
       o+='<div class="C"><div class="L" style="margin-bottom:8px">KEY METRICS</div><div class="G GA">';
       dm.forEach(function(m){o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:18px;font-weight:800;color:'+m.c+'">'+m.v+'</div>'+(m.s?'<div style="font-size:9px;color:var(--dim);margin-top:2px">'+m.s+'</div>':'')+'</div>';});
       o+='</div></div>';
+      
+      // === PACK STRUCTURE ANALYSIS ===
+      if(sel.ps&&sel.ps.valid){
+        var ps=sel.ps;
+        o+='<div class="C" style="border-color:#d4a01744"><div class="L" style="margin-bottom:8px;color:var(--gld)">📊 PACK STRUCTURE ANALYSIS</div>';
+        
+        // BTP Zone
+        o+='<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">';
+        o+='<div style="flex:1;min-width:200px"><div class="L" style="font-size:8px">BTP ZONE ('+ps.btpType+')</div>';
+        ps.btpZone.forEach(function(t){
+          var roleClr=t.role==="PRIMARY_BTP"?"var(--grn)":t.role==="SECONDARY_BTP"?"var(--blu)":"var(--amb)";
+          var roleLabel=t.role==="PRIMARY_BTP"?"PRIMARY":t.role==="SECONDARY_BTP"?"SECONDARY":"MID-TIER";
+          o+='<div style="display:flex;align-items:center;gap:8px;margin-top:4px">';
+          o+='<span style="font-weight:700;color:'+roleClr+'">$'+fN(t.a)+'</span>';
+          o+='<span style="font-size:9px;padding:2px 6px;border-radius:3px;background:'+roleClr+'18;color:'+roleClr+';font-weight:600">'+roleLabel+'</span>';
+          o+='<span style="font-size:10px;color:var(--dim)">'+t.ratio.toFixed(2)+'/pack</span>';
+          o+='</div>';
+        });
+        o+='<div style="font-size:10px;color:var(--dim);margin-top:6px">Zone ceiling: $'+fN(ps.zoneCeiling)+' · Above this = outlier prizes</div>';
+        o+='</div>';
+        
+        // Validation
+        o+='<div style="flex:1;min-width:200px"><div class="L" style="font-size:8px">PACKS SOLD VALIDATION</div>';
+        o+='<div class="G" style="grid-template-columns:1fr 1fr 1fr;margin-top:4px">';
+        [{l:"BTP Clock",v:fN(ps.methodA)},{l:"Prize Count",v:fN(ps.methodB)},{l:"$ Yield",v:fN(ps.methodC)}].forEach(function(m){
+          o+='<div><div style="font-size:8px;color:var(--dim)">'+m.l+'</div><div style="font-size:13px;font-weight:700;color:var(--wht)">'+m.v+'</div></div>';
+        });
+        o+='</div>';
+        var confClr=ps.confidence==="HIGH"?"var(--grn)":ps.confidence==="MEDIUM"?"var(--amb)":"var(--red)";
+        o+='<div style="margin-top:6px;font-size:11px">Confidence: <strong style="color:'+confClr+'">'+ps.confidence+'</strong>';
+        if(ps.yieldValid)o+=' · Yield: <strong style="color:var(--grn)">VALIDATED</strong>';
+        else o+=' · Yield: <strong style="color:var(--red)">MISMATCH ('+((ps.yieldDelta)*100).toFixed(1)+'%)</strong>';
+        o+='</div></div></div>';
+        
+        // Density Shifts
+        if(ps.densityShifts.length>0){
+          o+='<div style="margin-top:10px"><div class="L" style="font-size:8px;margin-bottom:6px">ABOVE-BTP DENSITY SHIFT — remaining vs launch</div>';
+          ps.densityShifts.forEach(function(d){
+            var sigClr=d.signal==="STRONG"?"#2ecc71":d.signal==="GOOD"?"#2ecc71":d.signal==="NEUTRAL"?"#5a6a7a":d.signal==="WEAK"?"#f39c12":"#e74c3c";
+            var barW=Math.min(100,Math.max(5,d.shift*50)); // 1.0x = 50%, 2.0x = 100%
+            o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">';
+            o+='<div style="width:70px;text-align:right;font-weight:700;font-size:12px;color:var(--wht)">$'+fN(d.a)+'</div>';
+            o+='<div style="flex:1;height:22px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
+            o+='<div style="width:'+barW+'%;height:100%;background:'+sigClr+';opacity:.6;border-radius:4px"></div>';
+            // 1.0x reference line
+            o+='<div style="position:absolute;left:50%;top:0;width:2px;height:100%;background:#f39c12;opacity:.5"></div>';
+            o+='<span style="position:absolute;right:6px;top:3px;font-size:10px;color:#fff;font-weight:600">'+d.shift.toFixed(2)+'x</span></div>';
+            o+='<div style="width:60px;font-size:10px;font-weight:700;color:'+sigClr+'">'+d.signal+'</div>';
+            o+='<div style="width:80px;font-size:9px;color:var(--dim)">'+fN(d.remaining)+' in '+fN(ps.packsRemaining)+'</div></div>';
+          });
+          o+='<div style="font-size:10px;color:var(--dim);margin-top:4px">Yellow line = launch baseline (1.0x). Right of line = concentrated in remaining packs.</div>';
+        }
+        
+        // Pack composition
+        o+='<div style="margin-top:10px;padding:8px 10px;background:var(--bg);border-radius:6px">';
+        o+='<div class="L" style="font-size:8px;margin-bottom:4px">REMAINING PACK COMPOSITION</div>';
+        var abvPct2=ps.packsRemaining>0?(ps.abvRemaining/ps.packsRemaining*100).toFixed(1):0;
+        o+='<div style="font-size:12px;color:var(--text)">';
+        o+='<strong style="color:var(--grn)">'+fN(ps.abvRemaining)+'</strong> packs have above-BTP prizes ('+abvPct2+'%) · ';
+        o+='<strong style="color:var(--dim)">'+fN(ps.btpOnlyRemaining)+'</strong> are BTP-only packs';
+        o+='</div>';
+        // Overall density
+        o+='<div style="font-size:11px;margin-top:4px">Overall above-BTP density: <strong style="color:'+(ps.overallShift>=1.2?"var(--grn)":ps.overallShift>=0.9?"var(--wht)":"var(--red)")+'">'+ps.overallShift.toFixed(2)+'x</strong> vs launch</div>';
+        o+='</div>';
+        
+        // Signal
+        var psSigClr=ps.signal==="STRONG_BUY"?"var(--grn)":ps.signal==="BUY"?"var(--grn)":ps.signal==="AVOID"?"var(--red)":ps.signal==="WEAK"?"var(--amb)":ps.signal==="EARLY"?"var(--blu)":"var(--dim)";
+        o+='<div style="margin-top:8px;padding:8px 12px;background:var(--bg);border-radius:6px;border-left:3px solid '+psSigClr+'">';
+        o+='<span style="font-size:13px;font-weight:700;color:'+psSigClr+'">'+ps.signal.replace("_"," ")+'</span> ';
+        o+='<span style="font-size:11px;color:var(--text)">'+esc(ps.signalReason)+'</span></div>';
+        
+        o+='</div>';
+      }
       
       // === RETURN GAP GRAPH + TOP TIER DONUT ===
       o+='<div class="C"><div style="display:flex;gap:16px;flex-wrap:wrap">';
@@ -890,6 +1241,11 @@ function render(){
       if(a.gm.sig==="AVOID")ins.push({pri:3,cat:"AVOID",title:a.g.nm+" — Top prizes depleting fast",detail:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id});
       if(a.mat<0.08&&a.complete)ins.push({pri:4,cat:"NEW",title:a.g.nm+" — only "+pct(a.mat)+" sold",detail:"Full prize pool. All "+a.tp.p+" top prizes available.",c:"var(--blu)",pr:a.g.pr,id:a.g.id});
       a.gm.ts.forEach(function(t){if(t.sig==="HOT"&&t.dev<-0.15&&t.rem>0)ins.push({pri:3,cat:"$"+fN(t.a)+" HOT",title:a.g.nm+" — $"+fN(t.a)+" underclaimed "+(Math.abs(t.dev)*100).toFixed(0)+"%",detail:t.rem+" remain. Category: "+t.cat,c:"var(--pur)",pr:a.g.pr,id:a.g.id})});
+      // Pack structure patterns
+      if(a.ps&&a.ps.valid&&a.ps.topShift){
+        if(a.ps.signal==="STRONG_BUY")ins.push({pri:1,cat:"CONCENTRATED",title:a.g.nm+" — top prize "+a.ps.topShift.shift.toFixed(1)+"x density",detail:a.ps.signalReason+" Confidence: "+a.ps.confidence,c:"var(--grn)",pr:a.g.pr,id:a.g.id});
+        if(a.ps.signal==="AVOID")ins.push({pri:2,cat:"DEPLETED",title:a.g.nm+" — top prize "+a.ps.topShift.shift.toFixed(1)+"x density",detail:a.ps.signalReason,c:"var(--red)",pr:a.g.pr,id:a.g.id});
+      }
     });
     // Best per price
     var byP={};S.data.forEach(function(a){if(!byP[a.g.pr]||a.sc>byP[a.g.pr].sc)byP[a.g.pr]=a});
