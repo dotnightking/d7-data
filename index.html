@@ -1721,27 +1721,29 @@ function render(){
     
     var ins=[];
     S.data.forEach(function(a){
-      if(a.g.cs&&a.tpr>0)ins.push({pri:1,cat:"CLOSING",title:a.g.nm+" #"+a.g.gn+" — "+a.tpr+" top prizes left",detail:"Odds: "+fmtO(a.tpo)+" · "+pct(1-a.mat)+" tickets remain.",c:"var(--amb)",pr:a.g.pr,id:a.g.id});
-      if(a.tpr===0)ins.push({pri:1,cat:"TOP GONE",title:a.g.nm+" — all "+fmt(a.tp.a)+" claimed",detail:"No top prizes remain.",c:"var(--red)",pr:a.g.pr,id:a.g.id});
-      if(a.returnGap>0.02)ins.push({pri:2,cat:"RICH POOL",title:a.g.nm+" — remaining "+(a.returnGap*100).toFixed(1)+"% richer",detail:"Return gap: sold="+pct(a.soldReturn/a.g.pr)+" vs remaining="+pct(a.remainReturnPct),c:"var(--grn)",pr:a.g.pr,id:a.g.id});
-      if(a.returnGap<-0.02)ins.push({pri:3,cat:"THIN POOL",title:a.g.nm+" — remaining "+(Math.abs(a.returnGap)*100).toFixed(1)+"% thinner",detail:"Better prizes already claimed disproportionately.",c:"var(--red)",pr:a.g.pr,id:a.g.id});
-      if(a.hyperRatio>1.2)ins.push({pri:2,cat:"TOP TIER+",title:a.g.nm+" — top-tier odds "+a.hyperRatio.toFixed(1)+"x launch",detail:"P(top in pack): "+pct(a.hyperNow)+" now vs "+pct(a.hyperLaunch)+" at launch.",c:"var(--grn)",pr:a.g.pr,id:a.g.id});
-      if(a.gm.sig==="STRONG_BUY")ins.push({pri:2,cat:"STRONG BUY",title:a.g.nm+" — Top prizes underclaimed",detail:a.gm.rsn,c:"var(--grn)",pr:a.g.pr,id:a.g.id});
-      if(a.gm.sig==="DEAD")ins.push({pri:1,cat:"DEAD GAME",title:a.g.nm+" — All top prizes gone",detail:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id});
-      if(a.gm.sig==="AVOID")ins.push({pri:3,cat:"AVOID",title:a.g.nm+" — Top prizes depleting fast",detail:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id});
-      if(a.mat<0.08&&a.complete)ins.push({pri:4,cat:"NEW",title:a.g.nm+" — only "+pct(a.mat)+" sold",detail:"Full prize pool. All "+a.tp.p+" top prizes available.",c:"var(--blu)",pr:a.g.pr,id:a.g.id});
-      a.gm.ts.forEach(function(t){if(t.sig==="HOT"&&t.dev<-0.15&&t.rem>0)ins.push({pri:3,cat:"$"+fN(t.a)+" HOT",title:a.g.nm+" — $"+fN(t.a)+" underclaimed "+(Math.abs(t.dev)*100).toFixed(0)+"%",detail:t.rem+" remain. Category: "+t.cat,c:"var(--pur)",pr:a.g.pr,id:a.g.id})});
+      var gLabel=a.g.nm+" #"+a.g.gn;
+      if(a.g.cs&&a.tpr>0)ins.push({pri:3,cat:"CLOSING",title:gLabel+" — "+a.tpr+" top prizes left",detail:"Odds: "+fmtO(a.tpo)+" · "+pct(1-a.mat)+" tickets remain.",c:"var(--amb)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.tpr===0)ins.push({pri:8,cat:"TOP GONE",title:gLabel+" — all "+fmt(a.tp.a)+" claimed",detail:"No top prizes remain.",c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.returnGap>0.02)ins.push({pri:2,cat:"RICH POOL",title:gLabel+" — remaining "+(a.returnGap*100).toFixed(1)+"% richer",detail:"Return gap: sold="+pct(a.soldReturn/a.g.pr)+" vs remaining="+pct(a.remainReturnPct),c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.returnGap<-0.02)ins.push({pri:7,cat:"THIN POOL",title:gLabel+" — remaining "+(Math.abs(a.returnGap)*100).toFixed(1)+"% thinner",detail:"Better prizes already claimed disproportionately.",c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.hyperRatio>1.2)ins.push({pri:2,cat:"TOP TIER+",title:gLabel+" — top-tier odds "+a.hyperRatio.toFixed(1)+"x launch",detail:"P(top in pack): "+pct(a.hyperNow)+" now vs "+pct(a.hyperLaunch)+" at launch.",c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.gm.sig==="STRONG_BUY")ins.push({pri:1,cat:"STRONG BUY",title:gLabel+" — Top prizes underclaimed",detail:a.gm.rsn,c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.gm.sig==="DEAD")ins.push({pri:9,cat:"DEAD GAME",title:gLabel+" — All top prizes gone",detail:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.gm.sig==="AVOID")ins.push({pri:7,cat:"AVOID",title:gLabel+" — Top prizes depleting fast",detail:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.mat<0.08&&a.complete)ins.push({pri:4,cat:"NEW",title:gLabel+" — only "+pct(a.mat)+" sold",detail:"Full prize pool. All "+a.tp.p+" top prizes available.",c:"var(--blu)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      a.gm.ts.forEach(function(t){if(t.sig==="HOT"&&t.dev<-0.15&&t.rem>0)ins.push({pri:3,cat:"$"+fN(t.a)+" HOT",title:gLabel+" — $"+fN(t.a)+" underclaimed "+(Math.abs(t.dev)*100).toFixed(0)+"%",detail:t.rem+" remain. Category: "+t.cat,c:"var(--pur)",pr:a.g.pr,id:a.g.id,sc:a.sc})});
       // Pack structure patterns
       if(a.ps&&a.ps.valid&&a.ps.topShift){
-        if(a.ps.signal==="STRONG_BUY")ins.push({pri:1,cat:"CONCENTRATED",title:a.g.nm+" — top prize "+a.ps.topShift.shift.toFixed(1)+"x density",detail:a.ps.signalReason+" Confidence: "+a.ps.confidence,c:"var(--grn)",pr:a.g.pr,id:a.g.id});
-        if(a.ps.signal==="AVOID")ins.push({pri:2,cat:"DEPLETED",title:a.g.nm+" — top prize "+a.ps.topShift.shift.toFixed(1)+"x density",detail:a.ps.signalReason,c:"var(--red)",pr:a.g.pr,id:a.g.id});
+        if(a.ps.signal==="STRONG_BUY")ins.push({pri:1,cat:"CONCENTRATED",title:gLabel+" — top prize "+a.ps.topShift.shift.toFixed(1)+"x density",detail:a.ps.signalReason+" Confidence: "+a.ps.confidence,c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+        if(a.ps.signal==="AVOID")ins.push({pri:7,cat:"DEPLETED",title:gLabel+" — top prize "+a.ps.topShift.shift.toFixed(1)+"x density",detail:a.ps.signalReason,c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
       }
     });
     // Best per price
     var byP={};S.data.forEach(function(a){if(!byP[a.g.pr]||a.sc>byP[a.g.pr].sc)byP[a.g.pr]=a});
     Object.keys(byP).forEach(function(pr){var a=byP[pr];var cnt=S.data.filter(function(x){return x.g.pr===a.g.pr}).length;
-      if(cnt>=2)ins.push({pri:5,cat:"BEST $"+pr,title:a.g.nm+" leads "+cnt+" games at $"+pr,detail:"Score: "+a.sc+" · Gap: "+(a.returnGap>0?"+":"")+pct(a.returnGap)+" · "+a.tpr+"/"+a.tp.p+" top left",c:"var(--blu)",pr:a.g.pr,id:a.g.id})});
-    ins.sort(function(a,b){return a.pri-b.pri});
+      if(cnt>=2)ins.push({pri:5,cat:"BEST $"+pr,title:a.g.nm+" #"+a.g.gn+" leads "+cnt+" games at $"+pr,detail:"Score: "+a.sc+" · Gap: "+(a.returnGap>0?"+":"")+pct(a.returnGap)+" · "+a.tpr+"/"+a.tp.p+" top left",c:"var(--blu)",pr:a.g.pr,id:a.g.id,sc:a.sc})});
+    // Sort: positive signals first (low pri), then within same pri, higher score first
+    ins.sort(function(a,b){return a.pri!==b.pri?a.pri-b.pri:b.sc-a.sc});
     
     o+='<div class="C"><div style="font-size:14px;font-weight:800;color:var(--wht);margin-bottom:4px">PATTERN DETECTION</div>';
     o+='<div style="font-size:11px;color:var(--dim);margin-bottom:8px">'+S.data.length+' games · '+ins.length+' patterns · Real data only</div></div>';
