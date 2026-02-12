@@ -359,56 +359,59 @@ function analyzePackStructure(a){
     tiers.push({a:p.a,printed:p.p,claimed:p.c,rem:rem,ratio:ratio,idx:i});
   }
   
-  // Find Primary BTP: tier with ratio closest to 1.0 (must be ≥ 0.5)
-  var primaryBTP=null,bestDist=Infinity;
+  // Find Primary BTP: HIGHEST dollar tier with ratio ≥ 0.5
+  // Walk down from top — first tier that appears ~1+ per pack is the BTP
+  // This matches analyze()'s BTP detection logic
+  var primaryBTP=null;
   for(i=0;i<tiers.length;i++){
-    if(tiers[i].ratio<0.5)continue;
-    var dist=Math.abs(tiers[i].ratio-1.0);
-    if(dist<bestDist){bestDist=dist;primaryBTP=tiers[i];}
+    // tiers[0] = highest $, tiers[last] = lowest $
+    if(tiers[i].ratio>=0.5){primaryBTP=tiers[i];break;}
   }
   if(!primaryBTP)return{valid:false,reason:"Cannot detect Primary BTP"};
   
-  // Build BTP zone: walk UP from Primary BTP
+  // Build BTP zone: walk UP from Primary BTP contiguously
   // Primary BTP: ratio ≥ 0.5 and closest to 1.0
   // Secondary BTP: ratio ≥ 0.2 (1 in 5 packs)
   // Mid-tier BTP: ratio ≥ 0.05 (1 in 20 packs)
-  // Above BTP: ratio < 0.05
+  // Above BTP: ratio < 0.05 OR any tier after contiguity breaks
   var btpZone=[],aboveBTP=[];
   var primaryIdx=primaryBTP.idx;
   
-  // Everything at or below Primary BTP index is floor/BTP
-  for(i=g.pz.length-1;i>=0;i--){
+  // Floor: everything below Primary BTP (higher index = lower $)
+  for(i=g.pz.length-1;i>primaryIdx;i--){
+    tiers[i].role="FLOOR";
+    btpZone.push(tiers[i]);
+  }
+  // Primary BTP itself
+  tiers[primaryIdx].role="PRIMARY_BTP";
+  btpZone.push(tiers[primaryIdx]);
+  
+  // Walk UP from Primary BTP (decreasing index = increasing $)
+  // CONTIGUOUS: once a tier drops below 0.05, everything above is ABOVE_BTP
+  var zoneBroken=false;
+  for(i=primaryIdx-1;i>=0;i--){
     var t=tiers[i];
-    if(i>primaryIdx){
-      // Below primary BTP = floor
-      t.role="FLOOR";
-      btpZone.push(t);
-    }else if(i===primaryIdx){
-      t.role="PRIMARY_BTP";
+    if(zoneBroken||t.ratio<0.05){
+      zoneBroken=true;
+      t.role="ABOVE_BTP";
+      aboveBTP.push(t);
+    }else if(t.ratio>=0.2){
+      t.role="SECONDARY_BTP";
       btpZone.push(t);
     }else{
-      // Above primary BTP — check frequency
-      if(t.ratio>=0.2){
-        t.role="SECONDARY_BTP";
-        btpZone.push(t);
-      }else if(t.ratio>=0.05){
-        t.role="MID_BTP";
-        btpZone.push(t);
-      }else{
-        t.role="ABOVE_BTP";
-        aboveBTP.push(t);
-      }
+      // 0.05 <= ratio < 0.2
+      t.role="MID_BTP";
+      btpZone.push(t);
     }
   }
   
-  // Determine BTP type for this game
+  // Determine BTP type: count non-floor, non-primary tiers in zone
+  var zoneTierCount=btpZone.filter(function(t){return t.role==="SECONDARY_BTP"||t.role==="MID_BTP"}).length;
   var btpType="SINGLE";
-  var secondaryCount=btpZone.filter(function(t){return t.role==="SECONDARY_BTP"}).length;
-  var midCount=btpZone.filter(function(t){return t.role==="MID_BTP"}).length;
-  if(secondaryCount>0&&midCount>0)btpType="TRIPLE";
-  else if(secondaryCount>0||midCount>0)btpType="DUAL";
+  if(zoneTierCount>=2)btpType="TRIPLE";
+  else if(zoneTierCount===1)btpType="DUAL";
   
-  // BTP zone ceiling (highest tier in zone)
+  // BTP zone ceiling (highest $ tier in zone, excluding floor)
   var zoneCeiling=primaryBTP.a;
   for(i=0;i<btpZone.length;i++){if(btpZone[i].a>zoneCeiling&&btpZone[i].role!=="FLOOR")zoneCeiling=btpZone[i].a;}
   
@@ -443,9 +446,10 @@ function analyzePackStructure(a){
   }
   var packsRemaining=Math.max(1,a.pc-packsSoldEst);
   
-  // === STEP 3: ABOVE-BTP PACK COUNTING (exact) ===
-  // Each claimed above-BTP prize = one above-BTP pack sold
-  // Each remaining above-BTP prize = one above-BTP pack in remaining pool
+  // === STEP 3: ABOVE-BTP PACK COUNTING (exact per tier) ===
+  // Each above-BTP prize lands in exactly one pack.
+  // Overlap (pack with 2+ above-BTP prizes) is astronomically rare — ignored.
+  // e.g. P($500 AND $1000 in same pack) ≈ (500/183000)×(10/50) ≈ 0.00003
   var abvClaimed=0,abvRemaining=0,abvPrinted=0;
   for(i=0;i<aboveBTP.length;i++){
     abvClaimed+=aboveBTP[i].claimed;
