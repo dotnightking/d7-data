@@ -941,8 +941,8 @@ function render(){
         {l:"RETURN GAP",v:sel.returnGap!==0?(sel.returnGap>0?"+":"")+pct(sel.returnGap):"—",c:sel.returnGap>0?"var(--grn)":sel.returnGap<0?"var(--red)":"var(--dim)",s:sel.returnGap>0?"Remaining richer than sold":"Remaining thinner than sold"},
         {l:"TOP TIER P(PACK)",v:sel.hyperNow>0?sel.hyperNow>=0.01?pct(sel.hyperNow):"1:"+fN(Math.round(1/sel.hyperNow)):"—",c:sel.hyperRatio>1?"var(--grn)":"var(--dim)",s:sel.hyperRatio>0?sel.hyperRatio.toFixed(2)+"x vs launch":""},
         {l:"WIN ODDS (now)",v:"1:"+Math.round(sel.winOdds),c:sel.winOdds<sel.g.odds?"var(--grn)":"var(--dim)"},
-        {l:"TOP PRIZES",v:sel.tpr+" / "+sel.tp.p+" left",c:sel.tpr>0?"var(--grn)":"var(--red)"},
-        {l:"TICKETS LEFT",v:fN(sel.etr)+(sel.g.tot>0?" / "+fN(sel.g.tot):""),s:sel.mat>0?pct(1-sel.mat)+" remaining":"",c:"var(--wht)"},
+        {l:"TOP PRIZE $"+fN(sel.tp.a),v:sel.tpr+" / "+sel.tp.p+" left",c:sel.tpr>0?"var(--grn)":"var(--red)",s:sel.tpr>0&&sel.epr>0?"1:"+fN(Math.round(sel.epr/sel.tpr))+" packs"+(sel.pc>0&&sel.tp.p>0?" (was 1:"+fN(Math.round(sel.pc/sel.tp.p))+")":""):""},
+        {l:"TICKETS LEFT",v:fN(sel.etr)+(sel.g.tot>0?" / "+fN(sel.g.tot):""),s:(sel.mat>0?pct(1-sel.mat)+" remaining":"")+(sel.pc>0?" · "+fN(sel.epr)+"/"+fN(sel.pc)+" packs":""),c:"var(--wht)"},
         {l:"PRIZE $ LEFT",v:fmt(sel.tpvr),s:"of "+fmt(sel.tpvp),c:"var(--blu)"}
       ];
       o+='<div class="C"><div class="L" style="margin-bottom:8px">KEY METRICS</div><div class="G GA">';
@@ -1059,40 +1059,134 @@ function render(){
       }
       o+='</div>';
       
-      // RIGHT: Top tier donut (SVG)
-      o+='<div style="flex:0 0 180px;text-align:center">';
-      o+='<div class="L" style="margin-bottom:8px">TOP TIER vs PACKS</div>';
-      // Donut: top-tier prizes remaining / total remaining packs
-      var topRem2=0,topPrinted2=0;
-      sel.prizes.forEach(function(p){if(p.cat==="TOP"){topRem2+=p.rem;topPrinted2+=p.p}});
-      var topClaimed2=topPrinted2-topRem2;
-      // SVG donut
-      var r=65,cx=90,cy=90,sw=18;
-      var circ=2*Math.PI*r;
-      // Segments: claimed (red), remaining (green), empty packs (dark)
-      var topPct2=topPrinted2>0?topClaimed2/topPrinted2:0;
-      var remPct2=topPrinted2>0?topRem2/topPrinted2:0;
-      var dash1=circ*topPct2,gap1=circ*(1-topPct2);
-      var dash2=circ*remPct2,gap2=circ*(1-remPct2);
-      o+='<svg width="180" height="180" viewBox="0 0 180 180">';
-      // Background ring
-      o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#1a2332" stroke-width="'+sw+'"/>';
-      // Claimed segment
-      o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#e74c3c" stroke-width="'+sw+'" stroke-dasharray="'+dash1+' '+gap1+'" stroke-dashoffset="'+(circ*0.25)+'" stroke-linecap="round"/>';
-      // Remaining segment
-      o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#2ecc71" stroke-width="'+sw+'" stroke-dasharray="'+dash2+' '+gap2+'" stroke-dashoffset="'+(circ*0.25-dash1)+'" stroke-linecap="round"/>';
-      // Center text
-      o+='<text x="'+cx+'" y="'+(cy-8)+'" text-anchor="middle" fill="#2ecc71" font-size="22" font-weight="800">'+topRem2+'</text>';
-      o+='<text x="'+cx+'" y="'+(cy+8)+'" text-anchor="middle" fill="#8899aa" font-size="10">of '+topPrinted2+'</text>';
-      o+='<text x="'+cx+'" y="'+(cy+22)+'" text-anchor="middle" fill="#8899aa" font-size="9">TOP LEFT</text>';
-      o+='</svg>';
-      // Pack ratio
-      if(sel.epr>0&&topRem2>0){
-        var packRatio=Math.round(sel.epr/topRem2);
-        o+='<div style="font-size:12px;color:var(--wht);margin-top:4px;font-weight:700">1 in '+fN(packRatio)+' packs</div>';
-        o+='<div style="font-size:10px;color:var(--dim)">has a TOP tier prize</div>';
-      }else if(topRem2===0){
-        o+='<div style="font-size:12px;color:var(--red);margin-top:4px;font-weight:700">ALL CLAIMED</div>';
+      // RIGHT: JACKPOT TRACKER — top 1-3 prize tiers individually
+      // Determine how many top tiers to show based on game price + prize rarity
+      // $1-$5: top 1-2, $10-$20: top 2-3, $30+: top 3
+      var jackpotTiers=[];
+      var aboveBtp=sel.prizes.filter(function(p){return p.isO});
+      // Sort by amount descending (should already be, but ensure)
+      aboveBtp.sort(function(a,b){return b.a-a.a});
+      var maxShow=sel.g.pr>=30?3:sel.g.pr>=10?3:2;
+      // Only include tiers that are genuinely rare (few printed relative to packs)
+      for(var jj=0;jj<Math.min(maxShow,aboveBtp.length);jj++){
+        var jp=aboveBtp[jj];
+        // Include if printed count is relatively small (rare prize) — ratio < 1 per 5 packs
+        if(sel.pc>0&&jp.p/sel.pc<0.2){
+          jackpotTiers.push(jp);
+        }else if(jj===0){
+          // Always include the #1 prize
+          jackpotTiers.push(jp);
+        }
+      }
+      
+      o+='<div style="flex:0 0 220px">';
+      o+='<div class="L" style="margin-bottom:8px">JACKPOT TRACKER</div>';
+      
+      // Game size context: total tickets (packs)
+      if(sel.g.tot>0&&sel.pc>0){
+        o+='<div style="font-size:10px;color:var(--dim);margin-bottom:8px">'+fN(sel.g.tot)+' tickets ('+fN(sel.pc)+' packs)</div>';
+      }
+      
+      if(jackpotTiers.length===0){
+        o+='<div style="font-size:11px;color:var(--dim)">No above-BTP prize data</div>';
+      }else{
+        // Combined donut for all jackpot tiers
+        var jtRem=0,jtPrinted=0;
+        jackpotTiers.forEach(function(jt){jtRem+=jt.rem;jtPrinted+=jt.p});
+        var jtClaimed=jtPrinted-jtRem;
+        
+        // SVG donut
+        var r=55,cx=75,cy=75,sw=16;
+        var circ=2*Math.PI*r;
+        var jtClaimPct=jtPrinted>0?jtClaimed/jtPrinted:0;
+        var jtRemPct=jtPrinted>0?jtRem/jtPrinted:0;
+        var dash1=circ*jtClaimPct,gap1=circ*(1-jtClaimPct);
+        var dash2=circ*jtRemPct,gap2=circ*(1-jtRemPct);
+        o+='<div style="text-align:center">';
+        o+='<svg width="150" height="150" viewBox="0 0 150 150">';
+        o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#1a2332" stroke-width="'+sw+'"/>';
+        o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#e74c3c" stroke-width="'+sw+'" stroke-dasharray="'+dash1+' '+gap1+'" stroke-dashoffset="'+(circ*0.25)+'" stroke-linecap="round"/>';
+        o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#2ecc71" stroke-width="'+sw+'" stroke-dasharray="'+dash2+' '+gap2+'" stroke-dashoffset="'+(circ*0.25-dash1)+'" stroke-linecap="round"/>';
+        o+='<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" fill="'+(jtRem>0?'#2ecc71':'#e74c3c')+'" font-size="20" font-weight="800">'+jtRem+'</text>';
+        o+='<text x="'+cx+'" y="'+(cy+8)+'" text-anchor="middle" fill="#8899aa" font-size="9">of '+jtPrinted+'</text>';
+        o+='<text x="'+cx+'" y="'+(cy+20)+'" text-anchor="middle" fill="#8899aa" font-size="8">JACKPOTS LEFT</text>';
+        o+='</svg>';
+        o+='</div>';
+        
+        // Per-tier breakdown rows
+        jackpotTiers.forEach(function(jt){
+          var pctLeft=jt.p>0?jt.rem/jt.p:0;
+          var clr=jt.rem<=0?"var(--red)":pctLeft>0.5?"var(--grn)":"var(--amb)";
+          // Pack odds: remaining packs / remaining prizes for this tier
+          var packOdds=sel.epr>0&&jt.rem>0?Math.round(sel.epr/jt.rem):0;
+          // Launch pack odds for comparison
+          var launchPackOdds=sel.pc>0&&jt.p>0?Math.round(sel.pc/jt.p):0;
+          // Odds change
+          var oddsImproved=packOdds>0&&launchPackOdds>0&&packOdds<launchPackOdds;
+          var oddsWorse=packOdds>0&&launchPackOdds>0&&packOdds>launchPackOdds;
+          var oddsRatio=launchPackOdds>0&&packOdds>0?launchPackOdds/packOdds:0;
+          
+          o+='<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid #ffffff10">';
+          // Prize amount
+          o+='<div style="flex:0 0 60px;font-weight:800;color:'+clr+';font-size:13px">$'+fN(jt.a)+'</div>';
+          // Remaining / printed
+          o+='<div style="flex:1;font-size:10px">';
+          if(jt.rem<=0){
+            o+='<span style="color:var(--red);font-weight:700">ALL CLAIMED</span>';
+          }else{
+            o+='<span style="color:var(--wht);font-weight:600">'+jt.rem+' of '+jt.p+'</span>';
+            o+='<span style="color:var(--dim)"> left</span>';
+          }
+          o+='</div>';
+          // Pack odds
+          o+='<div style="flex:0 0 auto;text-align:right;font-size:10px">';
+          if(packOdds>0){
+            o+='<div style="color:var(--wht);font-weight:700">1:'+fN(packOdds)+'</div>';
+            if(oddsImproved){
+              o+='<div style="color:var(--grn);font-size:8px">'+oddsRatio.toFixed(1)+'x better</div>';
+            }else if(oddsWorse){
+              o+='<div style="color:var(--red);font-size:8px">'+(1/oddsRatio).toFixed(1)+'x worse</div>';
+            }else{
+              o+='<div style="color:var(--dim);font-size:8px">vs 1:'+fN(launchPackOdds)+' launch</div>';
+            }
+          }else if(jt.rem<=0){
+            o+='<div style="color:var(--red);font-size:9px">—</div>';
+          }
+          o+='</div>';
+          o+='</div>';
+        });
+        
+        // Overall: combined jackpot pack odds using hypergeometric
+        if(sel.epr>0&&jtRem>0){
+          // P(at least 1 jackpot tier in a pack) = 1 - C(etr-jtRem,pk)/C(etr,pk)
+          var jHyper=0;
+          if(sel.etr>0&&sel.g.pk>0){
+            function jLogC(n,k){if(k>n||k<0)return-Infinity;if(k===0||k===n)return 0;if(k>n-k)k=n-k;var s=0;for(var i2=1;i2<=k;i2++)s+=Math.log(n-i2+1)-Math.log(i2);return s}
+            var jlp0=jLogC(sel.etr-jtRem,sel.g.pk)-jLogC(sel.etr,sel.g.pk);
+            jHyper=1-Math.exp(jlp0);
+          }
+          // Launch hypergeometric
+          var jHyperL=0;
+          if(sel.g.tot>0&&sel.g.pk>0&&jtPrinted>0){
+            var jlp0L=jLogC(sel.g.tot-jtPrinted,sel.g.pk)-jLogC(sel.g.tot,sel.g.pk);
+            jHyperL=1-Math.exp(jlp0L);
+          }
+          var jRatio=jHyperL>0?jHyper/jHyperL:0;
+          
+          o+='<div style="margin-top:6px;padding:6px;background:#ffffff08;border-radius:6px;text-align:center">';
+          o+='<div style="font-size:9px;color:var(--dim)">JACKPOT IN A PACK (hypergeometric)</div>';
+          o+='<div style="font-size:14px;font-weight:800;color:'+(jHyper>=0.01?'var(--wht)':'var(--dim)');
+          o+='">'+(jHyper>=0.01?pct(jHyper):'1:'+fN(Math.round(1/jHyper)))+'</div>';
+          if(jRatio>0){
+            var jClr=jRatio>1.05?"var(--grn)":jRatio<0.95?"var(--red)":"var(--dim)";
+            o+='<div style="font-size:9px;color:'+jClr+';font-weight:600">'+jRatio.toFixed(2)+'x vs launch'+(jRatio>1.05?' ▲':jRatio<0.95?' ▼':'')+'</div>';
+          }
+          o+='</div>';
+        }else if(jtRem===0){
+          o+='<div style="margin-top:6px;padding:6px;background:var(--red)15;border-radius:6px;text-align:center">';
+          o+='<div style="font-size:11px;color:var(--red);font-weight:700">ALL JACKPOTS CLAIMED</div>';
+          o+='</div>';
+        }
       }
       o+='</div>';
       o+='</div></div>';
