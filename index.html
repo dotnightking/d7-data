@@ -876,7 +876,7 @@ function buildGamePrompt(a){
   lines.push("Sold return: "+(a.soldReturn>0?"$"+(a.soldReturn/g.pr).toFixed(4)+" per $1 spent ("+pct(a.soldReturn/g.pr)+")":"N/A"));
   lines.push("Remaining return: "+pct(a.remainReturnPct)+" per ticket dollar");
   lines.push("Return gap: "+(a.returnGap>0?"+":"")+pct(a.returnGap)+" — "+(a.returnGap>0?"remaining packs return MORE per dollar than sold packs":"remaining packs return LESS per dollar than sold packs"));
-  lines.push("Win odds now: 1:"+Math.round(a.winOdds)+(g.odds?" (published at launch: 1:"+g.odds+", "+(a.winOdds<g.odds?"IMPROVED":"WORSE")+" now)":""));
+  lines.push("Win odds now: 1:"+a.winOdds.toFixed(2)+(g.odds?" (published at launch: 1:"+g.odds+", "+(a.winOdds<g.odds?"IMPROVED":"WORSE")+" now)":""));
   lines.push("");
   
   // === TOP PRIZE ===
@@ -884,7 +884,7 @@ function buildGamePrompt(a){
   lines.push("$"+fN(a.tp.a)+" — "+a.tpr+" of "+a.tp.p+" remaining ("+(a.tpr===0?"ALL GONE":pct(a.tpr/a.tp.p)+" left")+")");
   if(a.epr>0&&a.tpr>0){
     lines.push("Current odds: 1 in "+fN(Math.round(a.epr/a.tpr))+" packs (was 1 in "+fN(Math.round(a.pc/a.tp.p))+" at launch)");
-    lines.push("Top prize P(in a pack): now "+pct(a.tpPack)+" per pack");
+    lines.push("Top prize P(in a pack): now "+(a.tpPack>=0.001?pct(a.tpPack):"1 in "+fN(Math.round(1/a.tpPack))+" packs"));
   }
   if(a.tpr===0)lines.push("*** ALL TOP PRIZES ARE GONE — no $"+fN(a.tp.a)+" prizes remain ***");
   lines.push("");
@@ -1216,7 +1216,7 @@ function render(){
         {l:"Return Gap",v:a.returnGap!==0?(a.returnGap>0?"+":"")+pct(a.returnGap):"—",c:a.returnGap>0.01?"g":a.returnGap<-0.01?"r":"d"},
         {l:"Top Tier Odds",v:a.hyperRatio>0?a.hyperRatio.toFixed(2)+"x":"—",c:a.hyperRatio>1.1?"g":a.hyperRatio<0.9?"r":"d"},
         {l:"Markov",v:a.gm.sig.replace("_"," "),c:a.gm.sig==="STRONG_BUY"?"g":a.gm.sig==="BUY"?"g":a.gm.sig==="AVOID"?"r":a.gm.sig==="DEAD"?"r":a.gm.sig==="CAUTION"?"a":a.gm.sig==="MIXED"?"a":"d"},
-        {l:"Win Odds",v:"1:"+Math.round(a.winOdds),c:a.winOdds<a.g.odds?"g":"d"},
+        {l:"Win Odds",v:"1:"+a.winOdds.toFixed(2),c:a.winOdds<a.g.odds?"g":"d"},
         {l:"Top Left",v:a.tpr+"/"+a.tp.p,c:a.tpr>0?"g":"r"},
         {l:"Sold",v:pct(a.mat),c:a.mat<0.5?"g":a.mat<0.8?"a":"r"},
         {l:"Designed Return",v:a.designedReturn>0?pct(a.designedReturn):"—",c:"d"},
@@ -1271,7 +1271,7 @@ function render(){
         {l:"REMAINING RETURN",v:sel.remainReturnPct>0?pct(sel.remainReturnPct):"—",c:sel.remainReturnPct>sel.designedReturn?"var(--grn)":sel.remainReturnPct<sel.designedReturn?"var(--red)":"var(--dim)",s:"Current per-ticket return"},
         {l:"RETURN GAP",v:sel.returnGap!==0?(sel.returnGap>0?"+":"")+pct(sel.returnGap):"—",c:sel.returnGap>0?"var(--grn)":sel.returnGap<0?"var(--red)":"var(--dim)",s:sel.returnGap>0?"Remaining richer than sold":"Remaining thinner than sold"},
         {l:"TOP TIER P(PACK)",v:sel.hyperNow>0?sel.hyperNow>=0.01?pct(sel.hyperNow):"1:"+fN(Math.round(1/sel.hyperNow)):"—",c:sel.hyperRatio>1?"var(--grn)":"var(--dim)",s:sel.hyperRatio>0?sel.hyperRatio.toFixed(2)+"x vs launch":""},
-        {l:"WIN ODDS (now)",v:"1:"+Math.round(sel.winOdds),c:sel.winOdds<sel.g.odds?"var(--grn)":"var(--dim)"},
+        {l:"WIN ODDS (now)",v:"1:"+sel.winOdds.toFixed(2),c:sel.winOdds<sel.g.odds?"var(--grn)":"var(--dim)"},
         {l:"TOP PRIZE $"+fN(sel.tp.a),v:sel.tpr+" / "+sel.tp.p+" left",c:sel.tpr>0?"var(--grn)":"var(--red)",s:sel.tpr>0&&sel.epr>0?"1:"+fN(Math.round(sel.epr/sel.tpr))+" packs"+(sel.pc>0&&sel.tp.p>0?" (was 1:"+fN(Math.round(sel.pc/sel.tp.p))+")":""):""},
         {l:"TICKETS LEFT",v:fN(sel.etr)+(sel.g.tot>0?" / "+fN(sel.g.tot):""),s:(sel.mat>0?pct(1-sel.mat)+" remaining":"")+(sel.pc>0?" · "+fN(sel.epr)+"/"+fN(sel.pc)+" packs":""),c:"var(--wht)"},
         {l:"PRIZE $ LEFT",v:fmt(sel.tpvr),s:"of "+fmt(sel.tpvp),c:"var(--blu)"}
