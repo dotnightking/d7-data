@@ -426,13 +426,65 @@ function analyzePackStructure(a){
   var winnersPerPack=g.odds>0?g.pk/g.odds:0;
   var methodB=winnersPerPack>0?Math.round(totalClaimed/winnersPerPack):0;
   
-  // Method C: Prize $ claimed / (pack price × AssumedPackYieldRange midpoint)
+  // Method C: Prize $ claimed / (pack price × yield projection)
+  // Instead of hardcoded 70%, run projections from floor% up in increments
   var dollarsClaimed=0;
   for(i=0;i<g.pz.length;i++)dollarsClaimed+=g.pz[i].a*g.pz[i].c;
-  var yieldMidpoint=0.70; // center of AssumedPackYieldRange
-  var methodC=packPrice>0?Math.round(dollarsClaimed/(packPrice*yieldMidpoint)):0;
+  
+  // === EV PROJECTIONS ===
+  // Run analysis at multiple yield assumptions: floor, +10%, +15%, +20%, +25%, +30%
+  // Each projection gives a different Method C packs-sold estimate
+  // Signals that hold across ALL projections are high confidence
+  var floorPctRaw=g.guar>0?g.guar/packPrice:0;
+  var projYields=[];
+  // Start at floor rounded up to nearest 5%, then go in 5% increments up to floor+30% (capped at 85%)
+  var startPct=Math.ceil(floorPctRaw*20)/20; // round up to nearest 5%
+  if(startPct<floorPctRaw)startPct=floorPctRaw;
+  var projSteps=[0,0.10,0.15,0.20,0.25,0.30];
+  for(i=0;i<projSteps.length;i++){
+    var yld=floorPctRaw+projSteps[i];
+    if(yld>0.85)break; // cap at 85%
+    if(yld<=0)continue;
+    projYields.push(yld);
+  }
+  // Always include 0.70 if not already covered (legacy reference point)
+  var has70=false;
+  for(i=0;i<projYields.length;i++){if(Math.abs(projYields[i]-0.70)<0.01)has70=true;}
+  if(!has70&&floorPctRaw<0.70)projYields.push(0.70);
+  projYields.sort(function(a,b){return a-b});
+  
+  // Run Method C at each projection
+  var projections=[];
+  for(i=0;i<projYields.length;i++){
+    var yld=projYields[i];
+    var mC=packPrice>0?Math.round(dollarsClaimed/(packPrice*yld)):0;
+    var isFloor=Math.abs(yld-floorPctRaw)<0.005;
+    projections.push({
+      yield:yld,
+      label:isFloor?"FLOOR":(yld*100).toFixed(0)+"%",
+      methodC:mC,
+      isFloor:isFloor
+    });
+  }
+  
+  // Use the projection closest to 70% for legacy Method C compatibility
+  var methodC=0;
+  var bestDist=Infinity;
+  for(i=0;i<projections.length;i++){
+    var dist=Math.abs(projections[i].yield-0.70);
+    if(dist<bestDist){bestDist=dist;methodC=projections[i].methodC;}
+  }
   
   // Confidence: how close are the three methods?
+  // Method C now uses the projection where it best matches Method A (BTP clock)
+  // This tells us the implied yield rate
+  var impliedYield=0;
+  var bestMatch=Infinity;
+  for(i=0;i<projections.length;i++){
+    var diff=Math.abs(projections[i].methodC-methodA);
+    if(diff<bestMatch){bestMatch=diff;impliedYield=projections[i].yield;}
+  }
+  
   var methods=[methodA,methodB,methodC].filter(function(m){return m>0});
   var packsSoldEst=methodA; // Primary BTP is our best clock
   var confidence="LOW";
@@ -485,20 +537,72 @@ function analyzePackStructure(a){
   // Top tier density (highest value above-BTP tiers)
   var topShift=densityShifts.length>0?densityShifts[0]:null; // highest $ tier
   
-  // === STEP 5: AssumedPackYieldRange VALIDATION ===
-  // Check: BTP packs at ~70% yield × packs_sold + above-BTP pack values ≈ total claimed $?
+  // === STEP 5: EV PROJECTIONS PER YIELD ASSUMPTION ===
+  // For each yield projection, compute: packs remaining, density shifts, jackpot EV, base EV
   var floorPct=g.guar>0?g.guar/packPrice:0;
-  var btpPacksSold=Math.max(0,packsSoldEst-abvClaimed);
-  var expectedBTPdollars=btpPacksSold*packPrice*yieldMidpoint;
+  var evProjections=[];
   
-  // Above-BTP packs: they also have BTP-level prizes + their above-BTP prize
-  var abvPrizeDollars=0;
-  for(i=0;i<aboveBTP.length;i++)abvPrizeDollars+=aboveBTP[i].a*aboveBTP[i].claimed;
-  var expectedAbvDollars=abvPrizeDollars+(abvClaimed*packPrice*yieldMidpoint);
+  // Above-BTP jackpot EV (same regardless of yield — based on pack counts from Method A)
+  var jackpotEV=0;
+  for(i=0;i<aboveBTP.length;i++){
+    if(aboveBTP[i].rem>0&&packsRemaining>0){
+      jackpotEV+=aboveBTP[i].a*(aboveBTP[i].rem/packsRemaining);
+    }
+  }
+  var jackpotEVLaunch=0;
+  for(i=0;i<aboveBTP.length;i++){
+    if(aboveBTP[i].printed>0&&a.pc>0){
+      jackpotEVLaunch+=aboveBTP[i].a*(aboveBTP[i].printed/a.pc);
+    }
+  }
+  var jackpotEVShift=jackpotEVLaunch>0?jackpotEV/jackpotEVLaunch:0;
   
-  var expectedTotal=expectedBTPdollars+expectedAbvDollars;
-  var yieldValidation=dollarsClaimed>0?Math.abs(expectedTotal-dollarsClaimed)/dollarsClaimed:1;
-  var yieldValid=yieldValidation<=0.05;
+  for(i=0;i<projections.length;i++){
+    var proj=projections[i];
+    var baseEV=packPrice*proj.yield;
+    var totalEV=baseEV+jackpotEV;
+    var edge=(totalEV/packPrice)-1; // negative = house edge
+    
+    // At launch
+    var baseEVLaunch=baseEV; // base yield doesn't shift
+    var totalEVLaunch=baseEVLaunch+jackpotEVLaunch;
+    var edgeLaunch=(totalEVLaunch/packPrice)-1;
+    
+    evProjections.push({
+      yield:proj.yield,
+      label:proj.label,
+      isFloor:proj.isFloor,
+      methodC:proj.methodC,
+      baseEV:baseEV,
+      jackpotEV:jackpotEV,
+      totalEV:totalEV,
+      edge:edge,
+      totalEVLaunch:totalEVLaunch,
+      edgeLaunch:edgeLaunch,
+      evShift:totalEVLaunch>0?totalEV/totalEVLaunch:0
+    });
+  }
+  
+  // === SIGNAL STABILITY ===
+  // A signal is "stable" if the density shift direction holds across all yield projections
+  // Since density uses Method A (BTP clock) for packs remaining, it doesn't change with yield
+  // But Method C matching tells us which yield is closest to reality
+  var signalStability="STABLE";
+  // Check: does Method A fall within the Method C projection range?
+  var methodCRange=projections.map(function(p){return p.methodC});
+  var mcMin=Math.min.apply(null,methodCRange);
+  var mcMax=Math.max.apply(null,methodCRange);
+  if(methodA>=mcMin&&methodA<=mcMax){
+    signalStability="STABLE"; // Method A sits within yield projection range
+  }else if(methodA<mcMin*0.8||methodA>mcMax*1.2){
+    signalStability="UNSTABLE"; // Method A outside range by >20%
+  }else{
+    signalStability="MARGINAL";
+  }
+  
+  // Yield validation: check if implied yield is reasonable
+  var yieldValid=impliedYield>=floorPct&&impliedYield<=0.85;
+  var yieldDelta=impliedYield>0?Math.abs(impliedYield-0.70):1;
   
   // === COMPOSITE SIGNAL ===
   var signal="NEUTRAL",signalReason="";
@@ -552,12 +656,55 @@ function analyzePackStructure(a){
     // Yield validation
     floorPct:floorPct,
     yieldValid:yieldValid,
-    yieldDelta:yieldValidation,
+    yieldDelta:yieldDelta,
+    impliedYield:impliedYield,
+    // EV
+    jackpotEV:jackpotEV,
+    jackpotEVLaunch:jackpotEVLaunch,
+    jackpotEVShift:jackpotEVShift,
+    evProjections:evProjections,
+    projections:projections,
+    signalStability:signalStability,
     // Signal
     signal:signal,
     signalReason:signalReason,
     maturity:maturity
   };
+}
+
+// === PACK STRUCTURE → SCORE INTEGRATION ===
+// Post-pass: adjusts analyze() score using pack structure signals
+function integratePS(a){
+  if(!a.ps||!a.ps.valid)return;
+  var ps=a.ps;
+  var adj=0;
+  
+  // 1. Density shift: -8 to +8 pts
+  if(ps.topShift){
+    adj+=Math.max(-8,Math.min(8,(ps.topShift.shift-1)*10));
+  }
+  
+  // 2. Jackpot EV shift: -5 to +5 pts
+  if(ps.jackpotEVShift>0){
+    adj+=Math.max(-5,Math.min(5,(ps.jackpotEVShift-1)*10));
+  }
+  
+  // 3. Confidence gate: LOW confidence dampens magnitude of score away from 50
+  if(ps.confidence==="LOW"){
+    // Clamp score toward 50 by 30%
+    var base=a.sc+adj;
+    var dampened=50+(base-50)*0.7;
+    adj=Math.round(dampened)-a.sc;
+  }
+  
+  // 4. Signal stability: unstable signals get dampened
+  if(ps.signalStability==="UNSTABLE"){
+    var base2=a.sc+adj;
+    var dampened2=50+(base2-50)*0.8;
+    adj=Math.round(dampened2)-a.sc;
+  }
+  
+  a.sc=Math.round(Math.min(100,Math.max(0,a.sc+adj)));
 }
 
 // === STATE ===
@@ -570,7 +717,7 @@ var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pac
 // === INIT: auto-fetch, no hardcoded data ===
 function init(){
   // Try cached data for instant render
-  try{var c=localStorage.getItem("txr_gd6");if(c){GD=JSON.parse(c);if(GD.length)S.data=GD.map(function(g){var a=analyze(g);a.ps=analyzePackStructure(a);return a;})}}catch(e){}
+  try{var c=localStorage.getItem("txr_gd6");if(c){GD=JSON.parse(c);if(GD.length)S.data=GD.map(function(g){var a=analyze(g);a.ps=analyzePackStructure(a);integratePS(a);return a;})}}catch(e){}
   DD=localStorage.getItem("txr_date6")||"";
   render();
   refreshAllData();
@@ -603,7 +750,7 @@ async function refreshAllData(){
         // Keep whatever the scraper provided — no fallback estimates
         GD.push(ng);
       });
-      S.data=GD.map(function(g){var a=analyze(g);a.ps=analyzePackStructure(a);return a;});
+      S.data=GD.map(function(g){var a=analyze(g);a.ps=analyzePackStructure(a);integratePS(a);return a;});
       DD=json.updated||"";
       localStorage.setItem("txr_date6",DD);
       localStorage.setItem("txr_gd6",JSON.stringify(GD));
@@ -716,6 +863,16 @@ function buildGamePrompt(a){
       });
     }
     lines.push("Pack Structure Signal: "+a.ps.signal+" — "+a.ps.signalReason);
+    if(a.ps.evProjections&&a.ps.evProjections.length>0){
+      lines.push("");
+      lines.push("EV PROJECTIONS (per pack, $"+(g.pk*g.pr)+" cost):");
+      lines.push("Implied yield: "+pct(a.ps.impliedYield)+" (where Method C ≈ BTP clock)");
+      lines.push("Jackpot EV/pack: $"+a.ps.jackpotEV.toFixed(2)+" now vs $"+a.ps.jackpotEVLaunch.toFixed(2)+" at launch ("+a.ps.jackpotEVShift.toFixed(2)+"x shift)");
+      lines.push("Signal stability: "+a.ps.signalStability);
+      a.ps.evProjections.forEach(function(ev){
+        lines.push("  "+ev.label+": Base $"+Math.round(ev.baseEV)+" + Jackpot $"+ev.jackpotEV.toFixed(2)+" = $"+Math.round(ev.totalEV)+" (edge: "+(ev.edge>0?"+":"")+pct(ev.edge)+")");
+      });
+    }
   }
   
   // Flag contradictions so LLM pays attention
@@ -893,7 +1050,9 @@ function render(){
         {l:"Designed Return",v:a.designedReturn>0?pct(a.designedReturn):"—",c:"d"},
         {l:"Remaining Return",v:a.remainReturnPct>0?pct(a.remainReturnPct):"—",c:a.remainReturnPct>a.designedReturn?"g":a.remainReturnPct<a.designedReturn?"r":"d"},
         {l:"Confidence",v:ps.valid?ps.confidence:"—",c:ps.valid?(ps.confidence==="HIGH"?"g":ps.confidence==="MEDIUM"?"a":"r"):"d"},
-        {l:"BTP Zone",v:ps.valid?ps.btpType:"—",c:ps.valid?(ps.btpType==="SINGLE"?"d":"b"):"d"}
+        {l:"BTP Zone",v:ps.valid?ps.btpType:"—",c:ps.valid?(ps.btpType==="SINGLE"?"d":"b"):"d"},
+        {l:"Jackpot EV",v:ps.valid&&ps.jackpotEV>0?"$"+ps.jackpotEV.toFixed(2):"—",c:ps.valid&&ps.jackpotEVShift>1.05?"g":ps.valid&&ps.jackpotEVShift<0.95?"r":"d"},
+        {l:"Implied Yield",v:ps.valid&&ps.impliedYield>0?pct(ps.impliedYield):"—",c:"d"}
       ];
       o+='<div class="G" style="grid-template-columns:repeat(auto-fit,minmax(90px,1fr));margin-top:10px">';
       ms.forEach(function(m){o+='<div><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:12px;font-weight:700" class="'+m.c+'">'+m.v+'</div></div>';});
@@ -978,8 +1137,8 @@ function render(){
         o+='</div>';
         var confClr=ps.confidence==="HIGH"?"var(--grn)":ps.confidence==="MEDIUM"?"var(--amb)":"var(--red)";
         o+='<div style="margin-top:6px;font-size:11px">Confidence: <strong style="color:'+confClr+'">'+ps.confidence+'</strong>';
-        if(ps.yieldValid)o+=' · Yield: <strong style="color:var(--grn)">VALIDATED</strong>';
-        else o+=' · Yield: <strong style="color:var(--red)">MISMATCH ('+((ps.yieldDelta)*100).toFixed(1)+'%)</strong>';
+        if(ps.yieldValid)o+=' · Implied yield: <strong style="color:var(--grn)">'+pct(ps.impliedYield)+'</strong>';
+        else o+=' · Implied yield: <strong style="color:var(--red)">'+pct(ps.impliedYield)+' (outside range)</strong>';
         o+='</div></div></div>';
         
         // Density Shifts
@@ -1019,6 +1178,67 @@ function render(){
         o+='<span style="font-size:13px;font-weight:700;color:'+psSigClr+'">'+ps.signal.replace("_"," ")+'</span> ';
         o+='<span style="font-size:11px;color:var(--text)">'+esc(ps.signalReason)+'</span></div>';
         
+        o+='</div>';
+      }
+      
+      // === EV PROJECTIONS ===
+      if(sel.ps&&sel.ps.valid&&sel.ps.evProjections&&sel.ps.evProjections.length>0){
+        var evp=sel.ps.evProjections;
+        var pprice=sel.g.pk*sel.g.pr;
+        o+='<div class="C" style="border-color:#3498db44"><div class="L" style="margin-bottom:8px;color:var(--blu)">📊 EV PROJECTIONS — PACK VALUE BY YIELD ASSUMPTION</div>';
+        o+='<div style="font-size:10px;color:var(--dim);margin-bottom:10px">Floor: '+pct(sel.ps.floorPct)+' ($'+Math.round(pprice*sel.ps.floorPct)+') · Implied yield: <strong style="color:var(--wht)">'+pct(sel.ps.impliedYield)+'</strong> (where Method C ≈ BTP clock) · Pack: $'+fN(pprice)+'</div>';
+        
+        // Header row
+        o+='<div style="display:grid;grid-template-columns:55px 1fr 70px 70px 65px 60px;gap:4px;padding:4px 0;border-bottom:1px solid var(--border);margin-bottom:2px">';
+        o+='<div style="font-size:8px;color:var(--dim);font-weight:600">YIELD</div>';
+        o+='<div style="font-size:8px;color:var(--dim);font-weight:600">EV BAR</div>';
+        o+='<div style="font-size:8px;color:var(--dim);font-weight:600;text-align:right">BASE EV</div>';
+        o+='<div style="font-size:8px;color:var(--dim);font-weight:600;text-align:right">TOTAL EV</div>';
+        o+='<div style="font-size:8px;color:var(--dim);font-weight:600;text-align:right">EDGE</div>';
+        o+='<div style="font-size:8px;color:var(--dim);font-weight:600;text-align:right">MC PACKS</div>';
+        o+='</div>';
+        
+        evp.forEach(function(ev){
+          var barPct=pprice>0?Math.min(100,(ev.totalEV/pprice)*100):0;
+          var evClr=ev.edge>=-0.15?"var(--grn)":ev.edge>=-0.30?"var(--amb)":"var(--red)";
+          var isImplied=Math.abs(ev.yield-sel.ps.impliedYield)<0.02;
+          var rowBg=isImplied?"#3498db12":ev.isFloor?"#2ecc7108":"transparent";
+          var labelClr=ev.isFloor?"var(--grn)":isImplied?"var(--blu)":"var(--dim)";
+          
+          o+='<div style="display:grid;grid-template-columns:55px 1fr 70px 70px 65px 60px;gap:4px;padding:3px 0;background:'+rowBg+';border-radius:4px;align-items:center">';
+          // Yield label
+          o+='<div style="font-size:11px;font-weight:'+(ev.isFloor||isImplied?'700':'400')+';color:'+labelClr+'">'+ev.label+(isImplied?' ◄':'')+'</div>';
+          // EV bar
+          o+='<div style="height:16px;background:var(--bg);border-radius:3px;overflow:hidden;position:relative">';
+          // Base EV portion
+          var basePct=pprice>0?(ev.baseEV/pprice)*100:0;
+          var jackPct=pprice>0?(ev.jackpotEV/pprice)*100:0;
+          o+='<div style="position:absolute;left:0;top:0;width:'+basePct+'%;height:100%;background:var(--blu);opacity:.4"></div>';
+          // Jackpot EV stacked on top
+          o+='<div style="position:absolute;left:'+basePct+'%;top:0;width:'+jackPct+'%;height:100%;background:var(--pur);opacity:.6"></div>';
+          // Pack price reference line
+          o+='<div style="position:absolute;right:0;top:0;width:1px;height:100%;background:var(--red);opacity:.5"></div>';
+          o+='</div>';
+          // Base EV
+          o+='<div style="font-size:10px;text-align:right;color:var(--dim)">$'+Math.round(ev.baseEV)+'</div>';
+          // Total EV
+          o+='<div style="font-size:11px;text-align:right;font-weight:700;color:var(--wht)">$'+Math.round(ev.totalEV)+'</div>';
+          // Edge
+          o+='<div style="font-size:10px;text-align:right;font-weight:700;color:'+evClr+'">'+(ev.edge>0?'+':'')+pct(ev.edge)+'</div>';
+          // Method C packs
+          o+='<div style="font-size:9px;text-align:right;color:var(--dim)">'+fN(ev.methodC)+'</div>';
+          o+='</div>';
+        });
+        
+        // Jackpot EV callout
+        o+='<div style="margin-top:10px;padding:8px 10px;background:var(--bg);border-radius:6px;display:flex;gap:16px;flex-wrap:wrap">';
+        o+='<div><div class="L" style="font-size:8px">JACKPOT EV / PACK</div><div style="font-size:14px;font-weight:800;color:var(--pur)">$'+sel.ps.jackpotEV.toFixed(2)+'</div></div>';
+        o+='<div><div class="L" style="font-size:8px">JACKPOT EV SHIFT</div><div style="font-size:14px;font-weight:800;color:'+(sel.ps.jackpotEVShift>=1.05?'var(--grn)':sel.ps.jackpotEVShift<=0.95?'var(--red)':'var(--dim)')+'">'+sel.ps.jackpotEVShift.toFixed(2)+'x</div></div>';
+        o+='<div><div class="L" style="font-size:8px">JACKPOT EV AT LAUNCH</div><div style="font-size:14px;font-weight:800;color:var(--dim)">$'+sel.ps.jackpotEVLaunch.toFixed(2)+'</div></div>';
+        o+='<div><div class="L" style="font-size:8px">SIGNAL STABILITY</div><div style="font-size:14px;font-weight:800;color:'+(sel.ps.signalStability==='STABLE'?'var(--grn)':sel.ps.signalStability==='MARGINAL'?'var(--amb)':'var(--red)')+'">'+sel.ps.signalStability+'</div></div>';
+        o+='</div>';
+        
+        o+='<div style="margin-top:6px;font-size:10px;color:var(--dim)"><span style="color:var(--blu)">■</span> Base EV (BTP zone) · <span style="color:var(--pur)">■</span> Jackpot EV (above-BTP) · <span style="color:var(--red)">|</span> Pack cost · ◄ = implied yield</div>';
         o+='</div>';
       }
       
