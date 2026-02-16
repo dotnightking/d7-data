@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-title" content="TX Engine">
 <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%230d1118' width='100' height='100' rx='20'/><text x='50' y='62' text-anchor='middle' fill='%232ecc71' font-size='36' font-weight='900' font-family='system-ui'>TX</text></svg>">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>TX Scratch-Off Engine v6</title>
+<title>TX Scratch-Off Engine v7</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎰</text></svg>">
 <style>
 :root{
@@ -56,18 +56,32 @@ td{padding:6px 8px;text-align:right;font-size:11px;border-bottom:1px solid #1e2d
 .bar-label{width:80px;text-align:right;font-size:11px;font-weight:600;flex-shrink:0}
 .bar-track{flex:1;height:22px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative;display:flex}
 .bar-pct{position:absolute;right:6px;top:3px;font-size:9px;color:var(--wht);font-weight:600;text-shadow:0 1px 2px #000}
+.spark{display:inline-flex;align-items:end;gap:1px;height:20px;vertical-align:middle}
+.spark-bar{width:3px;border-radius:1px;min-height:2px}
+.why-tag{font-size:10px;padding:3px 8px;border-radius:5px;font-weight:700;display:inline-block;margin:2px 2px}
 @media(max-width:640px){.G3{grid-template-columns:1fr 1fr}.GA{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}h1{font-size:17px}.bar-label{width:60px;font-size:10px}}
 </style>
 </head>
 <body>
 <div class="W" id="app"></div>
 <script>
-// === ZERO HARDCODED DATA ===
-// All game data loaded from feed.json (scraper output)
-var GD=[];  // populated by refreshAllData() ONLY
-var DD="";  // data date from feed.json
+// ============================================================
+// TX SCRATCH-OFF ENGINE v7 — SURGICAL UPGRADE
+// Changes from v6:
+// 1. Fact-based BTP detection (floor + odds + prize table)
+// 2. Jackpot focus: top 2-3 tiers $10K+ drive score
+// 3. Floor-based EV (no yield guessing)
+// 4. Monte Carlo simulation
+// 5. "Why this score?" tags
+// 6. Trend tracking with sparklines
+// 7. logC defined once globally
+// 8. Never mutate g.tot
+// ============================================================
 
-// === UTILITY FUNCTIONS ===
+var GD=[];
+var DD="";
+
+// === UTILITIES (unchanged from v6) ===
 function fmt(n){if(n>=1e6)return "$"+(n/1e6).toFixed(1)+"M";if(n>=1e3)return "$"+(n/1e3).toFixed(1)+"K";return "$"+Math.round(n)}
 function pct(n){return(n*100).toFixed(1)+"%"}
 function fmtO(n){if(n===Infinity||n>1e9)return "-";if(n>=1e6)return "1:"+Math.round(n/1e6)+"M";if(n>=1e3)return "1:"+Math.round(n/1e3)+"K";return "1:"+Math.round(n)}
@@ -75,654 +89,443 @@ function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").repl
 function fN(n){return n.toLocaleString()}
 function prClr(pr){var m={1:"#c39bd3",2:"#bb8fce",3:"#af7ac5",5:"#a569bd",10:"#9b59b6",20:"#884ea0",30:"#7d3c98",50:"#6c3483",100:"#5b2c6f"};return m[pr]||"#9b59b6"}
 
-// === CORE ANALYSIS ENGINE ===
-// Every number derived from game's own data. Zero assumptions.
+// === GLOBAL logC (used everywhere, defined ONCE) ===
+function logC(n,k){
+  if(k>n||k<0)return -Infinity;
+  if(k===0||k===n)return 0;
+  if(k>n-k)k=n-k;
+  var s=0;for(var i=1;i<=k;i++)s+=Math.log(n-i+1)-Math.log(i);return s;
+}
+
+// === ODDS VALIDATION ===
+// Verify prize counts match published odds
+function validateOdds(g){
+  if(!g.odds||g.odds<=0||!g.tot||g.tot<=0)return{valid:false};
+  var totalWinners=0;
+  for(var i=0;i<g.pz.length;i++)totalWinners+=g.pz[i].p;
+  var computedOdds=g.tot/totalWinners;
+  var diff=Math.abs(computedOdds-g.odds)/g.odds;
+  return{valid:diff<0.05,computedOdds:computedOdds,diff:diff,totalWinners:totalWinners};
+}
+
+// === FACT-BASED BTP DETECTION ===
+function detectBTP(g){
+  var i,p;
+  var packPrice=g.pk*g.pr;
+  var pc=g.tot>0&&g.pk>0?Math.round(g.tot/g.pk):0;
+  if(pc<=0)return{valid:false,reason:"Missing total/pack size"};
+
+  var tiers=[];
+  for(i=0;i<g.pz.length;i++){
+    p=g.pz[i];
+    tiers.push({a:p.a,printed:p.p,claimed:p.c,rem:p.p-p.c,ratio:p.p/pc,idx:i});
+  }
+
+  // Floor zone: tiers with ratio >= 0.3 (appear in 30%+ of packs)
+  var floorZone=[],aboveFloor=[];
+  for(i=0;i<tiers.length;i++){
+    if(tiers[i].ratio>=0.3)floorZone.push(tiers[i]);
+    else aboveFloor.push(tiers[i]);
+  }
+
+  // BTP = highest dollar tier with ratio >= 0.5 in floor zone
+  var btp=null;
+  for(i=0;i<floorZone.length;i++){
+    if(floorZone[i].ratio>=0.5&&(!btp||floorZone[i].a>btp.a))btp=floorZone[i];
+  }
+  if(!btp&&floorZone.length>0)btp=floorZone.reduce(function(a,b){return a.a>b.a?a:b});
+
+  // Validate BTP against floor guarantee
+  var floorValid=false,computedFloor=0;
+  if(g.guar>0&&floorZone.length>0){
+    var fzs=floorZone.slice().sort(function(a,b){return b.a-a.a});
+    // Try greedy: 1x each tier from highest down
+    var target=g.guar,comp=0;
+    for(i=0;i<fzs.length;i++){
+      var cnt=Math.max(1,Math.floor(fzs[i].ratio));
+      var maxByTarget=Math.floor(target/fzs[i].a);
+      cnt=Math.min(cnt,Math.max(1,maxByTarget));
+      if(cnt>0&&target>=fzs[i].a){comp+=fzs[i].a*cnt;target-=fzs[i].a*cnt;}
+    }
+    computedFloor=comp;
+    floorValid=Math.abs(g.guar-comp)<=Math.max(g.pr,g.guar*0.08);
+  }
+
+  // Jackpot tiers: $10K+, rare (ratio < 0.05), top 3
+  var jackpotTiers=[];
+  for(i=0;i<aboveFloor.length;i++){
+    if(aboveFloor[i].a>=10000&&aboveFloor[i].ratio<0.05)jackpotTiers.push(aboveFloor[i]);
+  }
+  jackpotTiers.sort(function(a,b){return b.a-a.a});
+  jackpotTiers=jackpotTiers.slice(0,3);
+
+  // Mid tiers: above floor but not jackpot
+  var jkMap={};for(i=0;i<jackpotTiers.length;i++)jkMap[jackpotTiers[i].a]=1;
+  var midTiers=aboveFloor.filter(function(t){return!jkMap[t.a]}).sort(function(a,b){return b.a-a.a});
+
+  return{
+    valid:true,pc:pc,packPrice:packPrice,
+    floorZone:floorZone.sort(function(a,b){return b.a-a.a}),
+    floorValid:floorValid,computedFloor:computedFloor,
+    btp:btp,hasJackpot:jackpotTiers.length>0,
+    jackpotTiers:jackpotTiers,midTiers:midTiers
+  };
+}
+
+// === CORE ANALYSIS ENGINE (v7: fact-based, jackpot-focused) ===
 function analyze(g){
-  var i,j,p,ratio,above;
+  var i,j,p;
   var R=function(p){return p.p-p.c};
-  
-  // === DATA COMPLETENESS CHECK ===
+
+  // === PACK COUNT — never mutate g.tot ===
+  var totalTickets=g.tot;
   var totWinP=0;for(i=0;i<g.pz.length;i++)totWinP+=g.pz[i].p;
   var tpvp=0;for(i=0;i<g.pz.length;i++)tpvp+=g.pz[i].a*g.pz[i].p;
-  
-  // If tot is missing or produces impossible return (>95%), use odds-based estimate
-  if(g.tot<=0&&g.odds>0)g.tot=Math.round(totWinP*g.odds);
-  if(g.tot>0&&g.pr>0&&tpvp/(g.tot*g.pr)>0.95&&g.odds>0){
-    // tot is wrong (more prize $ than ticket revenue). Recalc from odds.
-    g.tot=Math.round(totWinP*g.odds);
-  }
-  if(g.pk<=0)g.pk=0; // truly unknown, don't guess
-  
-  var complete=g.tot>0&&g.pk>0&&g.guar>0&&g.odds>0;
-  var pc=g.pk>0&&g.tot>0?Math.round(g.tot/g.pk):0;
-  
+  if(totalTickets<=0&&g.odds>0)totalTickets=Math.round(totWinP*g.odds);
+  var totEstimated=totalTickets!==g.tot;
+
+  var complete=totalTickets>0&&g.pk>0&&g.guar>0&&g.odds>0;
+  var pc=totalTickets>0&&g.pk>0?Math.round(totalTickets/g.pk):0;
+  var packPrice=g.pk*g.pr;
+
   // === DESIGNED RETURN ===
-  // total_prize_value / (total_tickets × ticket_price)
-  var designedReturn=g.tot>0&&g.pr>0?tpvp/(g.tot*g.pr):0;
-  
-  // === BTP DETECTION (hybrid: ratio + floor) ===
-  var ratBTP=null,cands=[];
-  if(pc>0){
-    for(i=0;i<g.pz.length;i++){p=g.pz[i];if(p.p<10)continue;ratio=p.p/pc;if(ratio>=0.5&&ratio<=2.0)cands.push({a:p.a,r:ratio})}
-    cands.sort(function(a,b){return b.a-a.a});
-    for(i=0;i<cands.length;i++){above=0;for(j=0;j<g.pz.length;j++)if(g.pz[j].a>cands[i].a)above+=g.pz[j].p;if(above/pc<1){ratBTP=cands[i].a;break}}
-  }
-  var flBTP=null;
-  if(pc>0&&g.guar>0){
-    var sp=g.pz.slice().sort(function(a,b){return a.a-b.a}),cv=0;
-    for(i=0;i<sp.length;i++){p=sp[i];ratio=p.p/pc;if(ratio<0.05)continue;cv+=p.a*ratio;if(cv>=g.guar&&!flBTP){above=0;for(j=0;j<g.pz.length;j++)if(g.pz[j].a>p.a)above+=g.pz[j].p;if(above/pc<1)flBTP=p.a}}
-  }
-  
-  // BTP: use highest of ratio-based and floor-based, no fallback table
-  var aa=0;
-  if(ratBTP&&flBTP)aa=Math.max(ratBTP,flBTP);else if(ratBTP)aa=ratBTP;else if(flBTP)aa=flBTP;
-  // If BTP can't be detected (missing pk/guar), use highest tier with ratio near 1
-  if(aa===0&&pc>0){for(i=g.pz.length-1;i>=0;i--){if(g.pz[i].p/pc>=0.5&&g.pz[i].p/pc<=2){aa=g.pz[i].a;break}}}
-  
-  // === BTP VALIDATION via designed return ===
-  // Floor return should be 30-70% of designed return (floor is minimum, not average)
-  var btpValid=false;
-  if(aa>0&&g.guar>0&&g.pk>0&&g.pr>0){
-    var floorReturn=g.guar/(g.pk*g.pr);
-    var floorRatio=designedReturn>0?floorReturn/designedReturn:0;
-    btpValid=floorRatio>=0.25&&floorRatio<=0.85;
-  }
-  
-  var ai=g.pz.findIndex(function(p){return p.a===aa}),at=ai>=0?g.pz[ai]:null;
-  var acr=at&&at.p>0?at.c/at.p:0; // BTP claim rate = our clock
-  
-  // === PACKS SOLD ESTIMATION (from BTP clock) ===
+  var designedReturn=totalTickets>0&&g.pr>0?tpvp/(totalTickets*g.pr):0;
+
+  // === FACT-BASED BTP ===
+  var gd={tot:totalTickets,pk:g.pk,pr:g.pr,guar:g.guar,odds:g.odds,pz:g.pz};
+  var btpInfo=detectBTP(gd);
+  var oddsCheck=validateOdds(gd);
+
+  var aa=btpInfo.valid&&btpInfo.btp?btpInfo.btp.a:0;
+  var ai=g.pz.findIndex(function(p){return p.a===aa});
+  var at=ai>=0?g.pz[ai]:null;
+  var acr=at&&at.p>0?at.c/at.p:0;
+  var btpValid=btpInfo.valid&&btpInfo.floorValid;
+
+  // === PACKS SOLD (BTP clock) ===
   var eps=pc>0?Math.round(pc*acr):0;
   var epr=Math.max(1,pc-eps);
   var ets=eps*g.pk;
-  var etr=Math.max(0,g.tot-ets);
-  
-  // === PRIZE VALUE ANALYSIS ===
+  var etr=Math.max(0,totalTickets-ets);
+
+  // === PRIZE VALUES ===
   var tpvc=0;for(i=0;i<g.pz.length;i++)tpvc+=g.pz[i].a*g.pz[i].c;
   var tpvr=tpvp-tpvc;
-  var pkc=g.pk*g.pr;
-  
-  // === RETURN GAP (remaining vs sold pack value) ===
-  // sold_return = claimed_prize_value / sold_tickets
-  // remaining_return = remaining_prize_value / remaining_tickets  
+  var pkc=packPrice;
+
+  // === RETURN GAP ===
   var soldReturn=ets>0?tpvc/ets:0;
   var remainReturn=etr>0?tpvr/etr:0;
-  var returnGap=soldReturn>0?(remainReturn-soldReturn)/soldReturn:0; // +ve = remaining richer
-  var remainReturnPct=etr>0&&g.pr>0?tpvr/(etr*g.pr):0; // per-ticket return rate of remaining
-  
-  // === TIER CATEGORIZATION (frequency break detection) ===
+  var returnGap=soldReturn>0?(remainReturn-soldReturn)/soldReturn:0;
+  var remainReturnPct=etr>0&&g.pr>0?tpvr/(etr*g.pr):0;
+
+  // === ABOVE-BTP tiers ===
   var ot=ai>=0?g.pz.slice(0,ai):[];
-  var tierCats={};
-  if(ai>=0)tierCats[g.pz[ai].a]="BTP";
-  for(i=ai+1;i<g.pz.length;i++)tierCats[g.pz[i].a]="BELOW";
-  
-  if(ot.length>0&&pc>0){
-    var freqs=[];
-    for(i=0;i<ot.length;i++)freqs.push({a:ot[i].a,freq:ot[i].p/pc,idx:i});
-    // freqs[0] = highest amount = lowest frequency typically
-    // Find biggest frequency ratio gap between consecutive tiers
-    var maxGR=0,gapIdx=-1;
-    for(i=0;i<freqs.length-1;i++){
-      var gr=freqs[i].freq>0?freqs[i+1].freq/freqs[i].freq:0;
-      if(gr>maxGR){maxGR=gr;gapIdx=i}
-    }
-    if(maxGR>10&&gapIdx>=0){
-      for(i=0;i<=gapIdx;i++)tierCats[freqs[i].a]="TOP";
-      for(i=gapIdx+1;i<freqs.length;i++)tierCats[freqs[i].a]="MID";
-    }else{
-      for(i=0;i<ot.length;i++)tierCats[ot[i].a]=i<2?"TOP":"MID";
-    }
-  }
-  
-  // === ABOVE-BTP ANALYSIS ===
   var olr=0,oot=0;
   for(i=0;i<ot.length;i++){olr+=R(ot[i]);oot+=ot[i].p}
   var orpC=epr>0?olr/epr:0,orpO=pc>0?oot/pc:0;
   var orpS=orpO>0?((orpC-orpO)/orpO)*100:0;
-  
+
   var abvC=0,abvP=0;for(i=0;i<ot.length;i++){abvC+=ot[i].c;abvP+=ot[i].p}
   var abvPct=abvP>0?abvC/abvP:0;
   var blwC=0,blwP=0;for(i=ai+1;i<g.pz.length;i++){blwC+=g.pz[i].c;blwP+=g.pz[i].p}
   var blwPct=blwP>0?blwC/blwP:0;
-  
+
+  // === TOP PRIZE ===
   var tp=g.pz[0],tpr=R(tp),tpo=etr>0&&tpr>0?etr/tpr:Infinity;
-  var mat=g.tot>0?ets/g.tot:0;
-  
-  // === HYPERGEOMETRIC PROBABILITY ===
-  // P(at least 1 top-tier prize in pack) using hypergeometric distribution
-  // P(X>=1) = 1 - P(X=0) = 1 - C(N-K,n)/C(N,n) where:
-  //   N=remaining tickets, K=remaining top prizes, n=pack size
-  var topTiers=ot.filter(function(p){return tierCats[p.a]==="TOP"});
-  var topRem=0;for(i=0;i<topTiers.length;i++)topRem+=R(topTiers[i]);
-  
-  // Hypergeometric: P(0 top in pack) = C(etr-topRem, pk) / C(etr, pk)
-  // Use log to avoid overflow: log(C(n,k)) = sum(log(n-i+1) - log(i)) for i=1..k
-  function logC(n,k){if(k>n||k<0)return-Infinity;if(k===0||k===n)return 0;if(k>n-k)k=n-k;var s=0;for(var i=1;i<=k;i++)s+=Math.log(n-i+1)-Math.log(i);return s}
-  
-  var hyperNow=0,hyperLaunch=0;
-  if(etr>0&&g.pk>0&&topRem>0){
-    var lp0=logC(etr-topRem,g.pk)-logC(etr,g.pk);
-    hyperNow=1-Math.exp(lp0);
-  }
-  // At launch
-  var topPrinted=0;for(i=0;i<topTiers.length;i++)topPrinted+=topTiers[i].p;
-  if(g.tot>0&&g.pk>0&&topPrinted>0){
-    var lp0L=logC(g.tot-topPrinted,g.pk)-logC(g.tot,g.pk);
-    hyperLaunch=1-Math.exp(lp0L);
-  }
-  var hyperRatio=hyperLaunch>0?hyperNow/hyperLaunch:0;
-  
-  // Simple top prize per pack (for display)
+  var mat=totalTickets>0?ets/totalTickets:0;
   var tpPack=epr>0&&tpr>0?tpr/epr:0;
-  
+
+  // === JACKPOT TIER ANALYSIS — PRIMARY FOCUS ===
+  var jackpotTiers=btpInfo.valid?btpInfo.jackpotTiers:[];
+  var jackpotRem=0,jackpotPrinted=0;
+  for(i=0;i<jackpotTiers.length;i++){jackpotRem+=jackpotTiers[i].rem;jackpotPrinted+=jackpotTiers[i].printed;}
+
+  // Density
+  var jackpotDensityNow=epr>0?jackpotRem/epr:0;
+  var jackpotDensityLaunch=pc>0?jackpotPrinted/pc:0;
+  var jackpotDensityShift=jackpotDensityLaunch>0?jackpotDensityNow/jackpotDensityLaunch:0;
+
+  // Per-tier shifts
+  var jackpotShifts=[];
+  for(i=0;i<jackpotTiers.length;i++){
+    var jt=jackpotTiers[i];
+    var lD=pc>0?jt.printed/pc:0;
+    var cD=epr>0?jt.rem/epr:0;
+    var sh=lD>0?cD/lD:0;
+    var lO=pc>0&&jt.printed>0?Math.round(pc/jt.printed):Infinity;
+    var cO=epr>0&&jt.rem>0?Math.round(epr/jt.rem):Infinity;
+    jackpotShifts.push({a:jt.a,printed:jt.printed,remaining:jt.rem,claimed:jt.claimed,
+      launchOdds:lO,currentOdds:cO,shift:sh,
+      signal:jt.rem<=0?"GONE":sh>=1.5?"STRONG":sh>=1.2?"GOOD":sh>=0.9?"NEUTRAL":sh>=0.7?"WEAK":"DEPLETED"});
+  }
+
+  // Jackpot EV
+  var jackpotEV=0,jackpotEVLaunch=0;
+  for(i=0;i<jackpotTiers.length;i++){
+    if(jackpotTiers[i].rem>0&&epr>0)jackpotEV+=jackpotTiers[i].a*(jackpotTiers[i].rem/epr);
+    if(jackpotTiers[i].printed>0&&pc>0)jackpotEVLaunch+=jackpotTiers[i].a*(jackpotTiers[i].printed/pc);
+  }
+  var jackpotEVShift=jackpotEVLaunch>0?jackpotEV/jackpotEVLaunch:0;
+
+  // === HYPERGEOMETRIC — JACKPOT TIERS ONLY ===
+  var hyperNow=0,hyperLaunch=0;
+  if(etr>0&&g.pk>0&&jackpotRem>0){hyperNow=1-Math.exp(logC(etr-jackpotRem,g.pk)-logC(etr,g.pk));}
+  if(totalTickets>0&&g.pk>0&&jackpotPrinted>0){hyperLaunch=1-Math.exp(logC(totalTickets-jackpotPrinted,g.pk)-logC(totalTickets,g.pk));}
+  var hyperRatio=hyperLaunch>0?hyperNow/hyperLaunch:0;
+
+  // === HOLLOWED OUT ===
+  var hollowedOut=false;
+  if(jackpotTiers.length>=2&&jackpotTiers[0].rem>0){
+    var midGone=true;for(i=1;i<jackpotTiers.length;i++)if(jackpotTiers[i].rem>0)midGone=false;
+    if(midGone)hollowedOut=true;
+  }
+
   // === WIN ODDS ===
   var totRem=0;for(i=0;i<g.pz.length;i++)totRem+=R(g.pz[i]);
   var winOdds=etr>0&&totRem>0?etr/totRem:Infinity;
-  
-  // === MARKOV VELOCITY (focused: TOP + TOP-1 + BTP only) ===
-  // Only the tiers that change your buy decision matter.
-  // Mid-range tiers ($500, $300, $200) are noise — they don't change anything.
+
+  // === MARKOV VELOCITY (all above-BTP for display, jackpot for score) ===
   var ts=[],gSig="NEUTRAL",gRsn="Claims tracking normally.";
-  
-  // Compute per-tier stats for display (all above-BTP tiers)
   for(i=0;i<ot.length;i++){
     p=ot[i];var ar=p.p>0?p.c/p.p:0;
     var dev=acr>0?(ar-acr)/acr:0;
-    var minSample=Math.max(5,p.p*0.02);
+    var minSample=Math.max(5,p.p*0.05);
+    var isJackpot=p.a>=10000&&(pc>0?p.p/pc:1)<0.05;
     var sig=p.c>=minSample&&dev<-0.05?"HOT":p.c>=minSample&&dev>0.05?"COLD":"NORMAL";
-    ts.push({a:p.a,ar:ar,er:acr,dev:dev,sig:sig,rem:R(p),cat:tierCats[p.a]||"?"});
+    ts.push({a:p.a,ar:ar,er:acr,dev:dev,sig:sig,rem:R(p),cat:isJackpot?"JACKPOT":"MID",isJackpot:isJackpot});
   }
-  
-  // Focus: only TOP-category tiers drive the signal
-  var topTierCount=0,topHot=0,topCold=0,topGone=false;
-  for(i=0;i<ts.length;i++){
-    if(ts[i].cat!=="TOP")continue;
-    topTierCount++;
-    if(ts[i].rem<=0)topGone=true;
-    if(ts[i].sig==="HOT")topHot++;
-    if(ts[i].sig==="COLD")topCold++;
+
+  // Signal from JACKPOT tiers
+  var jkH=0,jkC=0,jkN=0,allJkG=true;
+  for(i=0;i<ts.length;i++){if(!ts[i].isJackpot)continue;jkN++;if(ts[i].rem>0)allJkG=false;if(ts[i].sig==="HOT")jkH++;if(ts[i].sig==="COLD")jkC++;}
+
+  if(!btpInfo.hasJackpot){gSig="NO_JACKPOT";gRsn="No $10K+ prize tiers.";}
+  else if(allJkG&&jkN>0){gSig="DEAD";gRsn="All jackpot prizes claimed.";}
+  else if(jkC>0&&jkH===0){gSig="AVOID";gRsn="Jackpot prizes depleting faster than tickets selling.";}
+  else if(jkH>0&&jkC===0){
+    gSig="BUY";gRsn="Jackpot prizes underclaimed — in remaining packs.";
+    if(ts.filter(function(t){return!t.isJackpot&&t.sig==="HOT"}).length>0){gSig="STRONG_BUY";gRsn="Jackpot AND mid prizes underclaimed.";}
+  }else if(jkH>0&&jkC>0){gSig="MIXED";gRsn="Some jackpot tiers under, others overclaimed.";}
+  else{
+    var mH=ts.filter(function(t){return!t.isJackpot&&t.sig==="HOT"}).length;
+    var mC=ts.filter(function(t){return!t.isJackpot&&t.sig==="COLD"}).length;
+    if(mH>0&&mC===0){gSig="BUY";gRsn="Jackpot neutral but mid prizes underclaimed.";}
+    else if(mC>0&&mH===0){gSig="CAUTION";gRsn="Jackpot neutral but mid prizes depleting.";}
   }
-  var allTopGone=topTierCount>0&&ts.filter(function(t){return t.cat==="TOP"&&t.rem>0}).length===0;
-  // Also check TOP-1 (first MID tier = biggest non-top prize)
-  var mid1=null;
-  for(i=0;i<ts.length;i++){if(ts[i].cat==="MID"){mid1=ts[i];break;}}
-  
-  // Build signal from what matters
-  if(allTopGone){
-    gSig="DEAD";gRsn="All top-tier prizes claimed. Only mid/base prizes remain.";
-  }else if(topCold>0&&topHot===0){
-    gSig="AVOID";gRsn="Top prizes depleting faster than tickets are selling.";
-  }else if(topHot>0&&topCold===0){
-    gSig="BUY";gRsn="Top prizes underclaimed — sitting in remaining packs.";
-    if(mid1&&mid1.sig==="HOT"){gSig="STRONG_BUY";gRsn="Top AND mid-high prizes underclaimed — remaining packs enriched.";}
-  }else if(topHot>0&&topCold>0){
-    gSig="MIXED";gRsn="Some top tiers underclaimed, others overclaimed.";
-  }else{
-    // No significant deviation in top tiers
-    if(mid1&&mid1.sig==="HOT"){gSig="BUY";gRsn="Top tier neutral but mid-high prizes underclaimed.";}
-    else if(mid1&&mid1.sig==="COLD"){gSig="CAUTION";gRsn="Top tier neutral but mid-high prizes depleting.";}
-  }
-  // Dollar reconciliation: if return gap strongly contradicts, override
-  if(returnGap<-0.03&&(gSig==="STRONG_BUY"||gSig==="BUY")){gSig="NEUTRAL";gRsn="Tier counts lag but dollar value already claimed disproportionately.";}
-  if(returnGap>0.03&&gSig==="AVOID"){gSig="NEUTRAL";gRsn="Some tiers depleted but overall dollar value favors remaining.";}
-  
-  // === SCORING ===
+  if(returnGap<-0.03&&(gSig==="STRONG_BUY"||gSig==="BUY")){gSig="NEUTRAL";gRsn="Counts lag but dollars claimed disproportionately.";}
+  if(returnGap>0.03&&gSig==="AVOID"){gSig="NEUTRAL";gRsn="Some tiers depleted but dollar value favors remaining.";}
+
+  // === FLOOR-BASED EV ===
+  var floorEV=g.guar>0?g.guar:0;
+  var midRangeEV=0;
+  if(btpInfo.valid){for(i=0;i<btpInfo.midTiers.length;i++){var mt=btpInfo.midTiers[i];if(mt.rem>0&&epr>0)midRangeEV+=mt.a*(mt.rem/epr);}}
+  var totalEV=floorEV+midRangeEV+jackpotEV;
+  var edge=packPrice>0?(totalEV/packPrice)-1:0;
+  var midEVL=0;
+  if(btpInfo.valid){for(i=0;i<btpInfo.midTiers.length;i++){var mt2=btpInfo.midTiers[i];if(mt2.printed>0&&pc>0)midEVL+=mt2.a*(mt2.printed/pc);}}
+  var totalEVLaunch=floorEV+midEVL+jackpotEVLaunch;
+  var edgeLaunch=packPrice>0?(totalEVLaunch/packPrice)-1:0;
+
+  // === IMPLIED YIELD — DIAGNOSTIC ONLY ===
+  var impliedYield=eps>0&&packPrice>0?tpvc/(eps*packPrice):0;
+  var yieldValid=g.guar>0&&packPrice>0?(impliedYield>=(g.guar/packPrice)*0.9&&impliedYield<=0.85):false;
+
+  // === THREE-METHOD VALIDATION ===
+  var methodA=eps;
+  var totalClaimed=0;for(i=0;i<g.pz.length;i++)totalClaimed+=g.pz[i].c;
+  var methodB=g.odds>0&&g.pk>0?Math.round(totalClaimed/(g.pk/g.odds)):0;
+  var methodC=packPrice>0?Math.round(tpvc/(packPrice*0.70)):0;
+  var methods=[methodA,methodB,methodC].filter(function(m){return m>0});
+  var confidence="LOW";
+  if(methods.length>=2){var mx=Math.max.apply(null,methods),mn=Math.min.apply(null,methods);var sp=mx>0?(mx-mn)/mx:1;if(sp<=0.05)confidence="HIGH";else if(sp<=0.10)confidence="MEDIUM";}
+
+  // === SCORING — JACKPOT FOCUSED ===
   var sc=50;
-  
-  // 1. Return gap: -15 to +15 pts (strongest signal)
-  if(returnGap!==0)sc+=Math.max(-15,Math.min(15,returnGap*100));
-  
-  // 2. Top-tier hypergeometric vs launch: -10 to +10 pts
-  if(hyperRatio>0)sc+=Math.max(-10,Math.min(10,(hyperRatio-1)*20));
-  
-  // 3. Markov (now focused on top tiers): -10 to +10 pts
-  var mkPts={"STRONG_BUY":10,"BUY":5,"NEUTRAL":0,"MIXED":0,"CAUTION":-3,"AVOID":-8,"DEAD":-15};
-  sc+=(mkPts[gSig]||0);
-  
-  // 4. Top prizes: -20 if gone (hard penalty), +3 if most remain
-  if(tpr===0)sc-=20;else if(tp.p>0)sc+=Math.min(3,(tpr/tp.p)*3);
-  
-  // 5. Win odds shift: -5 to +5 pts
-  if(g.odds>0&&winOdds<Infinity){var oddsShift=(g.odds-winOdds)/g.odds;sc+=Math.max(-5,Math.min(5,oddsShift*20))}
-  
-  // 6. Closing: hard penalty if closing + dead, bonus if closing + top left
-  if(g.cs&&tpr===0)sc-=10;else if(g.cs&&tpr>0)sc+=3;
-  
-  // 7. Remaining return vs designed: -5 to +5
-  if(designedReturn>0&&remainReturnPct>0){var retShift=(remainReturnPct-designedReturn)/designedReturn;sc+=Math.max(-5,Math.min(5,retShift*15))}
-  
-  // 8. Incomplete data penalty
-  if(!complete)sc-=5;
-  
+  var scoreBreakdown=[];
+
+  // 1. Jackpot density shift: ±20 pts (PRIMARY)
+  if(jackpotDensityShift>0){var jdP=Math.max(-20,Math.min(20,(jackpotDensityShift-1)*25));sc+=jdP;scoreBreakdown.push({f:"Jackpot density "+jackpotDensityShift.toFixed(2)+"x",p:Math.round(jdP)});}
+  // 2. Top prize: ±15 pts
+  if(tpr===0){sc-=15;scoreBreakdown.push({f:"Top prize GONE",p:-15});}
+  else if(tp.p>0){var tpP=Math.min(5,Math.round((tpr/tp.p)*5));sc+=tpP;scoreBreakdown.push({f:"Top "+tpr+"/"+tp.p+" left",p:tpP});}
+  // 3. Hypergeometric: ±10 pts
+  if(hyperRatio>0){var hyP=Math.max(-10,Math.min(10,(hyperRatio-1)*20));sc+=hyP;scoreBreakdown.push({f:"Jackpot P(pack) "+hyperRatio.toFixed(2)+"x",p:Math.round(hyP)});}
+  // 4. Jackpot EV shift: ±10 pts
+  if(jackpotEVShift>0){var evP=Math.max(-10,Math.min(10,(jackpotEVShift-1)*15));sc+=evP;scoreBreakdown.push({f:"Jackpot EV "+jackpotEVShift.toFixed(2)+"x",p:Math.round(evP)});}
+  // 5. Markov jackpot: ±8 pts
+  var mkMap={"STRONG_BUY":8,"BUY":5,"NEUTRAL":0,"NO_JACKPOT":0,"MIXED":0,"CAUTION":-3,"AVOID":-8,"DEAD":-15};
+  var mkV=mkMap[gSig]||0;sc+=mkV;scoreBreakdown.push({f:"Markov "+gSig.replace(/_/g," "),p:mkV});
+  // 6. Return gap: ±5 pts (cross-check)
+  if(returnGap!==0){var rgP=Math.max(-5,Math.min(5,returnGap*50));sc+=rgP;scoreBreakdown.push({f:"Return gap "+(returnGap>0?"+":"")+pct(returnGap),p:Math.round(rgP)});}
+  // 7. Win odds: ±5 pts
+  if(g.odds>0&&winOdds<Infinity){var odP=Math.max(-5,Math.min(5,((g.odds-winOdds)/g.odds)*20));sc+=odP;scoreBreakdown.push({f:"Win odds shift",p:Math.round(odP)});}
+  // 8. Closing: +8/-10
+  if(g.cs&&tpr>0){sc+=8;scoreBreakdown.push({f:"CLOSING + jackpot left",p:8});}
+  else if(g.cs&&tpr===0){sc-=10;scoreBreakdown.push({f:"CLOSING + gone",p:-10});}
+  // 9. Hollowed: -10
+  if(hollowedOut){sc-=10;scoreBreakdown.push({f:"HOLLOWED — mid tiers gone",p:-10});}
+  // 10. No jackpot cap
+  if(!btpInfo.hasJackpot){sc=Math.min(sc,30);scoreBreakdown.push({f:"No $10K+ tiers",p:0});}
+  // 11. Early game dampen
+  if(mat<0.15&&mat>0){var pre=sc;sc=Math.round(50+(sc-50)*0.6);scoreBreakdown.push({f:"Early ("+pct(mat)+") dampen",p:sc-pre});}
+  // 12. Incomplete
+  if(!complete){sc-=5;scoreBreakdown.push({f:"Incomplete data",p:-5});}
+  // 13. LOW confidence dampen
+  if(confidence==="LOW"&&complete){var pre2=sc;sc=Math.round(50+(sc-50)*0.7);scoreBreakdown.push({f:"LOW conf dampen",p:sc-pre2});}
+
   sc=Math.round(Math.min(100,Math.max(0,sc)));
-  
+
+  // "Why this score?" — top 2 drivers
+  var whyScore=scoreBreakdown.slice().sort(function(a,b){return Math.abs(b.p)-Math.abs(a.p)}).filter(function(s){return s.p!==0}).slice(0,2);
+
+  // === TIER CATEGORIZATION ===
+  var tierCats={};
+  if(btpInfo.valid){
+    for(i=0;i<btpInfo.floorZone.length;i++)tierCats[btpInfo.floorZone[i].a]=btpInfo.floorZone[i].a===aa?"BTP":"FLOOR";
+    for(i=0;i<btpInfo.midTiers.length;i++)tierCats[btpInfo.midTiers[i].a]="MID";
+    for(i=0;i<btpInfo.jackpotTiers.length;i++)tierCats[btpInfo.jackpotTiers[i].a]="JACKPOT";
+  }else{
+    if(ai>=0)tierCats[g.pz[ai].a]="BTP";
+    for(i=0;i<ai;i++)tierCats[g.pz[i].a]=i<2?"JACKPOT":"MID";
+    for(i=ai+1;i<g.pz.length;i++)tierCats[g.pz[i].a]="FLOOR";
+  }
+
   // === TIER ADVANTAGE ===
   var tierAdv=[];
   for(i=0;i<ot.length;i++){p=ot[i];var trm=R(p);if(trm<=0)continue;
-    var origO=g.tot>0&&p.p>0?g.tot/p.p:Infinity;
-    var currO=etr>0&&trm>0?etr/trm:Infinity;
-    var pctB=origO>0&&origO<Infinity?((origO-currO)/origO)*100:0;
-    tierAdv.push({a:p.a,origO:origO,currO:currO,pctB:pctB,rem:trm,cat:tierCats[p.a]||"?"})}
-  
-  // === PRIZES TABLE DATA ===
+    var oO=totalTickets>0&&p.p>0?totalTickets/p.p:Infinity;
+    var cO2=etr>0&&trm>0?etr/trm:Infinity;
+    var pB=oO>0&&oO<Infinity?((oO-cO2)/oO)*100:0;
+    tierAdv.push({a:p.a,origO:oO,currO:cO2,pctB:pB,rem:trm,cat:tierCats[p.a]||"?"});}
+
+  // === PRIZES TABLE ===
   var prizes=[];for(i=0;i<g.pz.length;i++){p=g.pz[i];var rm=R(p);
     prizes.push({a:p.a,p:p.p,c:p.c,rem:rm,pctC:p.p>0?(p.c/p.p*100):0,
-      origO:g.tot>0?g.tot/p.p:Infinity,currO:etr>0&&rm>0?etr/rm:Infinity,
-      isA:p.a===aa,isO:ai>=0&&i<ai,cat:tierCats[p.a]||"?"})}
-  
+      origO:totalTickets>0?totalTickets/p.p:Infinity,currO:etr>0&&rm>0?etr/rm:Infinity,
+      isA:p.a===aa,isO:ai>=0&&i<ai,cat:tierCats[p.a]||"?",
+      isJackpot:p.a>=10000&&(pc>0?p.p/pc:1)<0.05,
+      highSens:p.p<=10});}
+
   // === FLAGS ===
   var flags=[];
-  if(tpr===0)flags.push({t:"DANGER",m:"All "+fmt(tp.a)+" top prizes claimed",c:"r"});
-  if(g.cs&&tpr>0)flags.push({t:"CLOSING",m:"Game closing with "+tpr+" top prizes left",c:"a"});
+  if(tpr===0)flags.push({t:"DANGER",m:"All "+fmt(tp.a)+" claimed",c:"r"});
+  if(g.cs&&tpr>0)flags.push({t:"CLOSING",m:tpr+" top prizes left in closing game",c:"a"});
   if(gSig==="STRONG_BUY")flags.push({t:"HOT",m:gRsn,c:"g"});
-  if(gSig==="BUY")flags.push({t:"BUY SIGNAL",m:gRsn,c:"g"});
-  if(gSig==="DEAD")flags.push({t:"DEAD GAME",m:gRsn,c:"r"});
+  if(gSig==="BUY")flags.push({t:"BUY",m:gRsn,c:"g"});
+  if(gSig==="DEAD")flags.push({t:"DEAD",m:gRsn,c:"r"});
   if(gSig==="AVOID")flags.push({t:"AVOID",m:gRsn,c:"r"});
   if(gSig==="CAUTION")flags.push({t:"CAUTION",m:gRsn,c:"a"});
-  if(returnGap>0.02)flags.push({t:"RICH POOL",m:"Remaining packs "+(returnGap*100).toFixed(1)+"% richer than sold",c:"g"});
-  if(returnGap<-0.02)flags.push({t:"THIN POOL",m:"Remaining packs "+(Math.abs(returnGap)*100).toFixed(1)+"% thinner than sold",c:"r"});
-  if(hyperRatio>1.2)flags.push({t:"TOP TIER+",m:"Top-tier odds "+(hyperRatio).toFixed(1)+"x better than launch",c:"g"});
+  if(gSig==="NO_JACKPOT")flags.push({t:"NO JACKPOT",m:"No $10K+ tiers",c:"d"});
+  if(hollowedOut)flags.push({t:"HOLLOWED",m:"Top exists but mid tiers gone",c:"a"});
+  if(returnGap>0.02)flags.push({t:"RICH",m:"Remaining "+(returnGap*100).toFixed(1)+"% richer",c:"g"});
+  if(returnGap<-0.02)flags.push({t:"THIN",m:"Remaining "+(Math.abs(returnGap)*100).toFixed(1)+"% thinner",c:"r"});
+  if(hyperRatio>1.2)flags.push({t:"JACKPOT+",m:"Odds "+hyperRatio.toFixed(1)+"x vs launch",c:"g"});
   if(mat<0.08)flags.push({t:"FRESH",m:"Only "+pct(mat)+" sold",c:"b"});
-  if(!complete)flags.push({t:"INCOMPLETE",m:"Missing pack/odds/floor data from detail page",c:"a"});
-  for(i=0;i<ts.length;i++){if(ts[i].sig==="HOT"&&ts[i].dev<-0.15)flags.push({t:"$"+fN(ts[i].a)+" HOT",m:"Underclaimed vs ticket sales",c:"p"});}
-  
+  if(!complete)flags.push({t:"INCOMPLETE",m:"Missing detail page data",c:"a"});
+  for(i=0;i<jackpotShifts.length;i++){if(jackpotShifts[i].printed<=10)flags.push({t:"⚡$"+fN(jackpotShifts[i].a),m:"≤10 printed — high sensitivity",c:"a"});}
+  for(i=0;i<ts.length;i++){if(ts[i].isJackpot&&ts[i].sig==="HOT"&&ts[i].dev<-0.15)flags.push({t:"$"+fN(ts[i].a)+" HOT",m:"Underclaimed",c:"p"});}
+  if(!yieldValid&&complete)flags.push({t:"YIELD⚠",m:"Implied "+pct(impliedYield)+" outside range",c:"a"});
+  if(oddsCheck.valid===false&&g.odds>0)flags.push({t:"ODDS⚠",m:"Prize counts don't match published odds",c:"a"});
+
   return{g:g,pc:pc,aa:aa,ai:ai,acr:acr,eps:eps,epr:epr,ets:ets,etr:etr,
     tpvp:tpvp,tpvc:tpvc,tpvr:tpvr,pkc:pkc,complete:complete,
+    totalTickets:totalTickets,packPrice:packPrice,totEstimated:totEstimated,
     designedReturn:designedReturn,soldReturn:soldReturn,remainReturn:remainReturn,
-    returnGap:returnGap,remainReturnPct:remainReturnPct,btpValid:btpValid,
-    orpC:orpC,orpO:orpO,orpS:orpS,
-    abvPct:abvPct,blwPct:blwPct,
-    tp:tp,tpr:tpr,tpo:tpo,mat:mat,sc:sc,
+    returnGap:returnGap,remainReturnPct:remainReturnPct,
+    btpInfo:btpInfo,btpValid:btpValid,oddsCheck:oddsCheck,
+    orpC:orpC,orpO:orpO,orpS:orpS,abvPct:abvPct,blwPct:blwPct,
+    tp:tp,tpr:tpr,tpo:tpo,mat:mat,sc:sc,tpPack:tpPack,
     winOdds:winOdds,totRem:totRem,
+    jackpotTiers:jackpotTiers,jackpotShifts:jackpotShifts,
+    jackpotDensityNow:jackpotDensityNow,jackpotDensityLaunch:jackpotDensityLaunch,
+    jackpotDensityShift:jackpotDensityShift,
+    jackpotEV:jackpotEV,jackpotEVLaunch:jackpotEVLaunch,jackpotEVShift:jackpotEVShift,
     hyperNow:hyperNow,hyperLaunch:hyperLaunch,hyperRatio:hyperRatio,
-    tpPack:tpPack,tierAdv:tierAdv,tierCats:tierCats,
-    prizes:prizes,gm:{ts:ts,sig:gSig,rsn:gRsn},flags:flags};
+    hollowedOut:hollowedOut,
+    floorEV:floorEV,midRangeEV:midRangeEV,totalEV:totalEV,edge:edge,
+    totalEVLaunch:totalEVLaunch,edgeLaunch:edgeLaunch,
+    methodA:methodA,methodB:methodB,methodC:methodC,confidence:confidence,
+    impliedYield:impliedYield,yieldValid:yieldValid,
+    scoreBreakdown:scoreBreakdown,whyScore:whyScore,
+    tierAdv:tierAdv,tierCats:tierCats,prizes:prizes,
+    gm:{ts:ts,sig:gSig,rsn:gRsn},flags:flags};
 }
 
-// === PACK STRUCTURE ANALYSIS ===
-// Uses known facts (floor, odds, prize table) + AssumedPackYieldRange (observation: BTP packs return 65-75%)
-// Added as separate pass — does NOT modify analyze() outputs
-function analyzePackStructure(a){
-  var g=a.g,i,p;
-  if(!a.complete||a.pc<=0)return{valid:false,reason:"Incomplete data"};
-  
-  var packPrice=g.pk*g.pr;
-  if(packPrice<=0)return{valid:false,reason:"Missing pack price"};
-  
-  // === STEP 1: BTP ZONE DETECTION (dynamic, frequency-based) ===
-  // Calculate prizes-per-pack ratio for every tier
-  var tiers=[];
-  for(i=0;i<g.pz.length;i++){
-    p=g.pz[i];
-    var ratio=p.p/a.pc; // prizes per pack
-    var rem=p.p-p.c;
-    tiers.push({a:p.a,printed:p.p,claimed:p.c,rem:rem,ratio:ratio,idx:i});
-  }
-  
-  // Find Primary BTP: HIGHEST dollar tier with ratio ≥ 0.5
-  // Walk down from top — first tier that appears ~1+ per pack is the BTP
-  // This matches analyze()'s BTP detection logic
-  var primaryBTP=null;
-  for(i=0;i<tiers.length;i++){
-    // tiers[0] = highest $, tiers[last] = lowest $
-    if(tiers[i].ratio>=0.5){primaryBTP=tiers[i];break;}
-  }
-  if(!primaryBTP)return{valid:false,reason:"Cannot detect Primary BTP"};
-  
-  // Build BTP zone: walk UP from Primary BTP contiguously
-  // Primary BTP: ratio ≥ 0.5 and closest to 1.0
-  // Secondary BTP: ratio ≥ 0.2 (1 in 5 packs)
-  // Mid-tier BTP: ratio ≥ 0.05 (1 in 20 packs)
-  // Above BTP: ratio < 0.05 OR any tier after contiguity breaks
-  var btpZone=[],aboveBTP=[];
-  var primaryIdx=primaryBTP.idx;
-  
-  // Floor: everything below Primary BTP (higher index = lower $)
-  for(i=g.pz.length-1;i>primaryIdx;i--){
-    tiers[i].role="FLOOR";
-    btpZone.push(tiers[i]);
-  }
-  // Primary BTP itself
-  tiers[primaryIdx].role="PRIMARY_BTP";
-  btpZone.push(tiers[primaryIdx]);
-  
-  // Walk UP from Primary BTP (decreasing index = increasing $)
-  // CONTIGUOUS: once a tier drops below 0.05, everything above is ABOVE_BTP
-  var zoneBroken=false;
-  for(i=primaryIdx-1;i>=0;i--){
-    var t=tiers[i];
-    if(zoneBroken||t.ratio<0.05){
-      zoneBroken=true;
-      t.role="ABOVE_BTP";
-      aboveBTP.push(t);
-    }else if(t.ratio>=0.2){
-      t.role="SECONDARY_BTP";
-      btpZone.push(t);
-    }else{
-      // 0.05 <= ratio < 0.2
-      t.role="MID_BTP";
-      btpZone.push(t);
+// === MONTE CARLO PACK SIMULATION ===
+function simulatePacks(a,N){
+  if(!a.complete||a.epr<=0||a.etr<=0)return{valid:false};
+  N=N||10000;
+  var g=a.g,pk=g.pk,cost=a.packPrice,eW=g.odds>0?pk/g.odds:0;
+  // Build prize pool weights
+  var pool=[],totP=0;
+  for(var i=0;i<g.pz.length;i++){var rm=g.pz[i].p-g.pz[i].c;if(rm>0){pool.push({a:g.pz[i].a,w:rm});totP+=rm;}}
+  if(totP<=0)return{valid:false};
+  // Cumulative weights for fast sampling
+  var cum=[];var c=0;for(i=0;i<pool.length;i++){c+=pool[i].w;cum.push(c);}
+
+  var results=[],pFl=0,pPr=0,pJk=0,p5d=0,tRet=0;
+  var buckets=[{l:"Below Floor",mn:0,mx:a.floorEV-1,n:0},{l:"At Floor",mn:a.floorEV-1,mx:a.floorEV+cost*0.01,n:0},{l:"Floor+",mn:a.floorEV+cost*0.01,mx:cost,n:0},{l:"Break Even",mn:cost,mx:cost*2,n:0},{l:"2x-5x",mn:cost*2,mx:cost*5,n:0},{l:"5x+",mn:cost*5,mx:Infinity,n:0}];
+
+  for(var s=0;s<N;s++){
+    var tot=0,hasJ=false,has5=false;
+    var nW=Math.floor(eW)+(Math.random()<(eW%1)?1:0);
+    if(Math.random()<0.1)nW+=Math.random()<0.5?1:-1;
+    nW=Math.max(1,nW);
+    for(var w=0;w<nW;w++){
+      var r=Math.random()*totP,lo=0,hi=cum.length-1,drawn=pool[0].a;
+      while(lo<=hi){var mid2=(lo+hi)>>1;if(cum[mid2]<r)lo=mid2+1;else{drawn=pool[mid2].a;hi=mid2-1;}}
+      tot+=drawn;if(drawn>=10000)has5=true;if(drawn>=50000)hasJ=true;
     }
+    if(a.floorEV>0&&tot<a.floorEV)tot=a.floorEV;
+    results.push(tot);tRet+=tot;
+    if(tot<=a.floorEV+1)pFl++;if(tot>=cost)pPr++;if(has5)p5d++;if(hasJ)pJk++;
+    for(var b=0;b<buckets.length;b++){if(tot>buckets[b].mn&&tot<=buckets[b].mx){buckets[b].n++;break;}}
   }
-  
-  // Determine BTP type: count non-floor, non-primary tiers in zone
-  var zoneTierCount=btpZone.filter(function(t){return t.role==="SECONDARY_BTP"||t.role==="MID_BTP"}).length;
-  var btpType="SINGLE";
-  if(zoneTierCount>=2)btpType="TRIPLE";
-  else if(zoneTierCount===1)btpType="DUAL";
-  
-  // BTP zone ceiling (highest $ tier in zone, excluding floor)
-  var zoneCeiling=primaryBTP.a;
-  for(i=0;i<btpZone.length;i++){if(btpZone[i].a>zoneCeiling&&btpZone[i].role!=="FLOOR")zoneCeiling=btpZone[i].a;}
-  
-  // === STEP 2: THREE-METHOD PACKS SOLD VALIDATION ===
-  // Method A: Primary BTP claim rate
-  var primaryCR=primaryBTP.printed>0?primaryBTP.claimed/primaryBTP.printed:0;
-  var methodA=Math.round(a.pc*primaryCR);
-  
-  // Method B: Total prizes claimed / expected winners per pack
-  var totalClaimed=0;
-  for(i=0;i<g.pz.length;i++)totalClaimed+=g.pz[i].c;
-  var winnersPerPack=g.odds>0?g.pk/g.odds:0;
-  var methodB=winnersPerPack>0?Math.round(totalClaimed/winnersPerPack):0;
-  
-  // Method C: Prize $ claimed / (pack price × yield projection)
-  // Instead of hardcoded 70%, run projections from floor% up in increments
-  var dollarsClaimed=0;
-  for(i=0;i<g.pz.length;i++)dollarsClaimed+=g.pz[i].a*g.pz[i].c;
-  
-  // === EV PROJECTIONS ===
-  // Run analysis at multiple yield assumptions: floor, +10%, +15%, +20%, +25%, +30%
-  // Each projection gives a different Method C packs-sold estimate
-  // Signals that hold across ALL projections are high confidence
-  var floorPctRaw=g.guar>0?g.guar/packPrice:0;
-  var projYields=[];
-  // Start at floor rounded up to nearest 5%, then go in 5% increments up to floor+30% (capped at 85%)
-  var startPct=Math.ceil(floorPctRaw*20)/20; // round up to nearest 5%
-  if(startPct<floorPctRaw)startPct=floorPctRaw;
-  var projSteps=[0,0.10,0.15,0.20,0.25,0.30];
-  for(i=0;i<projSteps.length;i++){
-    var yld=floorPctRaw+projSteps[i];
-    if(yld>0.85)break; // cap at 85%
-    if(yld<=0)continue;
-    projYields.push(yld);
-  }
-  // Always include 0.70 if not already covered (legacy reference point)
-  var has70=false;
-  for(i=0;i<projYields.length;i++){if(Math.abs(projYields[i]-0.70)<0.01)has70=true;}
-  if(!has70&&floorPctRaw<0.70)projYields.push(0.70);
-  projYields.sort(function(a,b){return a-b});
-  
-  // Run Method C at each projection
-  var projections=[];
-  for(i=0;i<projYields.length;i++){
-    var yld=projYields[i];
-    var mC=packPrice>0?Math.round(dollarsClaimed/(packPrice*yld)):0;
-    var isFloor=Math.abs(yld-floorPctRaw)<0.005;
-    projections.push({
-      yield:yld,
-      label:isFloor?"FLOOR":(yld*100).toFixed(0)+"%",
-      methodC:mC,
-      isFloor:isFloor
-    });
-  }
-  
-  // Use the projection closest to 70% for legacy Method C compatibility
-  var methodC=0;
-  var bestDist=Infinity;
-  for(i=0;i<projections.length;i++){
-    var dist=Math.abs(projections[i].yield-0.70);
-    if(dist<bestDist){bestDist=dist;methodC=projections[i].methodC;}
-  }
-  
-  // Confidence: how close are the three methods?
-  // Method C now uses the projection where it best matches Method A (BTP clock)
-  // This tells us the implied yield rate
-  var impliedYield=0;
-  var bestMatch=Infinity;
-  for(i=0;i<projections.length;i++){
-    var diff=Math.abs(projections[i].methodC-methodA);
-    if(diff<bestMatch){bestMatch=diff;impliedYield=projections[i].yield;}
-  }
-  
-  var methods=[methodA,methodB,methodC].filter(function(m){return m>0});
-  var packsSoldEst=methodA; // Primary BTP is our best clock
-  var confidence="LOW";
-  if(methods.length>=2){
-    var maxM=Math.max.apply(null,methods);
-    var minM=Math.min.apply(null,methods);
-    var spread=maxM>0?(maxM-minM)/maxM:1;
-    if(spread<=0.05)confidence="HIGH";
-    else if(spread<=0.10)confidence="MEDIUM";
-    else confidence="LOW";
-  }
-  var packsRemaining=Math.max(1,a.pc-packsSoldEst);
-  
-  // === STEP 3: ABOVE-BTP PACK COUNTING (exact per tier) ===
-  // Each above-BTP prize lands in exactly one pack.
-  // Overlap (pack with 2+ above-BTP prizes) is astronomically rare — ignored.
-  // e.g. P($500 AND $1000 in same pack) ≈ (500/183000)×(10/50) ≈ 0.00003
-  var abvClaimed=0,abvRemaining=0,abvPrinted=0;
-  for(i=0;i<aboveBTP.length;i++){
-    abvClaimed+=aboveBTP[i].claimed;
-    abvRemaining+=aboveBTP[i].rem;
-    abvPrinted+=aboveBTP[i].printed;
-  }
-  var btpOnlyRemaining=Math.max(0,packsRemaining-abvRemaining);
-  
-  // === STEP 4: DENSITY SHIFT PER TIER ===
-  var densityShifts=[];
-  for(i=0;i<aboveBTP.length;i++){
-    var t=aboveBTP[i];
-    if(t.printed<=0)continue;
-    var launchDensity=t.printed/a.pc;
-    var currentDensity=t.rem>0?t.rem/packsRemaining:0;
-    var shift=launchDensity>0?currentDensity/launchDensity:0;
-    densityShifts.push({
-      a:t.a,
-      printed:t.printed,
-      remaining:t.rem,
-      launchOdds:Math.round(a.pc/t.printed),
-      currentOdds:t.rem>0?Math.round(packsRemaining/t.rem):Infinity,
-      shift:shift,
-      signal:shift>=1.5?"STRONG":shift>=1.2?"GOOD":shift>=0.9?"NEUTRAL":shift>=0.7?"WEAK":"DEPLETED"
-    });
-  }
-  
-  // Overall above-BTP density
-  var launchAbvDensity=a.pc>0?abvPrinted/a.pc:0;
-  var currentAbvDensity=packsRemaining>0?abvRemaining/packsRemaining:0;
-  var overallShift=launchAbvDensity>0?currentAbvDensity/launchAbvDensity:0;
-  
-  // Top tier density (highest value above-BTP tiers)
-  var topShift=densityShifts.length>0?densityShifts[0]:null; // highest $ tier
-  
-  // === STEP 5: EV PROJECTIONS PER YIELD ASSUMPTION ===
-  // For each yield projection, compute: packs remaining, density shifts, jackpot EV, base EV
-  var floorPct=g.guar>0?g.guar/packPrice:0;
-  var evProjections=[];
-  
-  // Above-BTP jackpot EV (same regardless of yield — based on pack counts from Method A)
-  var jackpotEV=0;
-  for(i=0;i<aboveBTP.length;i++){
-    if(aboveBTP[i].rem>0&&packsRemaining>0){
-      jackpotEV+=aboveBTP[i].a*(aboveBTP[i].rem/packsRemaining);
-    }
-  }
-  var jackpotEVLaunch=0;
-  for(i=0;i<aboveBTP.length;i++){
-    if(aboveBTP[i].printed>0&&a.pc>0){
-      jackpotEVLaunch+=aboveBTP[i].a*(aboveBTP[i].printed/a.pc);
-    }
-  }
-  var jackpotEVShift=jackpotEVLaunch>0?jackpotEV/jackpotEVLaunch:0;
-  
-  for(i=0;i<projections.length;i++){
-    var proj=projections[i];
-    var baseEV=packPrice*proj.yield;
-    var totalEV=baseEV+jackpotEV;
-    var edge=(totalEV/packPrice)-1; // negative = house edge
-    
-    // At launch
-    var baseEVLaunch=baseEV; // base yield doesn't shift
-    var totalEVLaunch=baseEVLaunch+jackpotEVLaunch;
-    var edgeLaunch=(totalEVLaunch/packPrice)-1;
-    
-    evProjections.push({
-      yield:proj.yield,
-      label:proj.label,
-      isFloor:proj.isFloor,
-      methodC:proj.methodC,
-      baseEV:baseEV,
-      jackpotEV:jackpotEV,
-      totalEV:totalEV,
-      edge:edge,
-      totalEVLaunch:totalEVLaunch,
-      edgeLaunch:edgeLaunch,
-      evShift:totalEVLaunch>0?totalEV/totalEVLaunch:0
-    });
-  }
-  
-  // === SIGNAL STABILITY ===
-  // A signal is "stable" if the density shift direction holds across all yield projections
-  // Since density uses Method A (BTP clock) for packs remaining, it doesn't change with yield
-  // But Method C matching tells us which yield is closest to reality
-  var signalStability="STABLE";
-  // Check: does Method A fall within the Method C projection range?
-  var methodCRange=projections.map(function(p){return p.methodC});
-  var mcMin=Math.min.apply(null,methodCRange);
-  var mcMax=Math.max.apply(null,methodCRange);
-  if(methodA>=mcMin&&methodA<=mcMax){
-    signalStability="STABLE"; // Method A sits within yield projection range
-  }else if(methodA<mcMin*0.8||methodA>mcMax*1.2){
-    signalStability="UNSTABLE"; // Method A outside range by >20%
-  }else{
-    signalStability="MARGINAL";
-  }
-  
-  // Yield validation: check if implied yield is reasonable
-  var yieldValid=impliedYield>=floorPct&&impliedYield<=0.85;
-  var yieldDelta=impliedYield>0?Math.abs(impliedYield-0.70):1;
-  
-  // === COMPOSITE SIGNAL ===
-  var signal="NEUTRAL",signalReason="";
-  if(topShift){
-    if(topShift.shift>=1.5&&confidence!=="LOW"){
-      signal="STRONG_BUY";
-      signalReason="Top prize "+topShift.shift.toFixed(1)+"x concentrated in remaining packs.";
-    }else if(topShift.shift>=1.2&&confidence!=="LOW"){
-      signal="BUY";
-      signalReason="Top prize "+topShift.shift.toFixed(1)+"x denser than at launch.";
-    }else if(topShift.shift<0.7){
-      signal="AVOID";
-      signalReason="Top prize depleted — "+topShift.shift.toFixed(1)+"x launch density.";
-    }else if(topShift.shift<0.9){
-      signal="WEAK";
-      signalReason="Top prize slightly depleted at "+topShift.shift.toFixed(1)+"x.";
-    }else{
-      signal="NEUTRAL";
-      signalReason="Top prize tracking near expected at "+topShift.shift.toFixed(1)+"x.";
-    }
-  }
-  // Maturity gate: if < 20% sold, signal is low confidence regardless
-  var maturity=a.pc>0?packsSoldEst/a.pc:0;
-  if(maturity<0.20&&(signal==="STRONG_BUY"||signal==="BUY")){
-    signal="EARLY";
-    signalReason="Only "+(maturity*100).toFixed(0)+"% sold — too early for reliable signal.";
-  }
-  
-  return{
-    valid:true,
-    // BTP Zone
-    btpType:btpType,
-    btpZone:btpZone.filter(function(t){return t.role!=="FLOOR"}).sort(function(a,b){return b.a-a.a}),
-    zoneCeiling:zoneCeiling,
-    primaryBTP:primaryBTP,
-    // Validation
-    methodA:methodA,methodB:methodB,methodC:methodC,
-    confidence:confidence,
-    packsSoldEst:packsSoldEst,
-    packsRemaining:packsRemaining,
-    // Above-BTP
-    aboveBTP:aboveBTP.sort(function(a,b){return b.a-a.a}),
-    abvPrinted:abvPrinted,
-    abvClaimed:abvClaimed,
-    abvRemaining:abvRemaining,
-    btpOnlyRemaining:btpOnlyRemaining,
-    // Density
-    densityShifts:densityShifts,
-    overallShift:overallShift,
-    topShift:topShift,
-    // Yield validation
-    floorPct:floorPct,
-    yieldValid:yieldValid,
-    yieldDelta:yieldDelta,
-    impliedYield:impliedYield,
-    // EV
-    jackpotEV:jackpotEV,
-    jackpotEVLaunch:jackpotEVLaunch,
-    jackpotEVShift:jackpotEVShift,
-    evProjections:evProjections,
-    projections:projections,
-    signalStability:signalStability,
-    // Signal
-    signal:signal,
-    signalReason:signalReason,
-    maturity:maturity
-  };
+  results.sort(function(a,b){return a-b});
+  return{valid:true,N:N,mean:tRet/N,median:results[N>>1],p5:results[Math.floor(N*0.05)],p95:results[Math.floor(N*0.95)],
+    pFloor:pFl/N,pProfit:pPr/N,p5Digit:p5d/N,pJackpot:pJk/N,
+    worst:results[0],best:results[N-1],cost:cost,floor:a.floorEV,
+    buckets:buckets,expPL:(tRet/N)-cost};
 }
 
-// === PACK STRUCTURE → SCORE INTEGRATION ===
-// Post-pass: adjusts analyze() score using pack structure signals
-function integratePS(a){
-  if(!a.ps||!a.ps.valid)return;
-  var ps=a.ps;
-  var adj=0;
-  
-  // 1. Density shift: -8 to +8 pts
-  if(ps.topShift){
-    adj+=Math.max(-8,Math.min(8,(ps.topShift.shift-1)*10));
-  }
-  
-  // 2. Jackpot EV shift: -5 to +5 pts
-  if(ps.jackpotEVShift>0){
-    adj+=Math.max(-5,Math.min(5,(ps.jackpotEVShift-1)*10));
-  }
-  
-  // 3. Confidence gate: LOW confidence dampens magnitude of score away from 50
-  if(ps.confidence==="LOW"){
-    // Clamp score toward 50 by 30%
-    var base=a.sc+adj;
-    var dampened=50+(base-50)*0.7;
-    adj=Math.round(dampened)-a.sc;
-  }
-  
-  // 4. Signal stability: unstable signals get dampened
-  if(ps.signalStability==="UNSTABLE"){
-    var base2=a.sc+adj;
-    var dampened2=50+(base2-50)*0.8;
-    adj=Math.round(dampened2)-a.sc;
-  }
-  
-  a.sc=Math.round(Math.min(100,Math.max(0,a.sc+adj)));
+// === TREND TRACKING ===
+function saveTrend(){
+  if(!S.data.length)return;
+  var d=new Date().toISOString().slice(0,10);
+  var t=JSON.parse(localStorage.getItem("txt7")||"{}");
+  S.data.forEach(function(a){
+    if(!a.complete)return;
+    var k=a.g.id;if(!t[k])t[k]=[];
+    if(t[k].length>0&&t[k][t[k].length-1].d===d)return;
+    t[k].push({d:d,sc:a.sc,jd:a.jackpotDensityShift,jr:a.jackpotTiers.reduce(function(s,x){return s+x.rem},0),mat:a.mat,tpr:a.tpr});
+    if(t[k].length>60)t[k]=t[k].slice(-60);
+  });
+  localStorage.setItem("txt7",JSON.stringify(t));
+}
+function getTrend(id){return(JSON.parse(localStorage.getItem("txt7")||"{}"))[id]||[];}
+function sparkline(data,field,h){
+  if(!data||data.length<2)return"";h=h||20;
+  var v=data.map(function(d){return d[field]||0}),mn=Math.min.apply(null,v),mx=Math.max.apply(null,v),rng=mx-mn||1;
+  var o='<span class="spark">';
+  for(var i=0;i<v.length;i++){var bh=Math.max(2,Math.round(((v[i]-mn)/rng)*h));
+    o+='<span class="spark-bar" style="height:'+bh+'px;background:'+(i===v.length-1?"var(--grn)":"var(--dim)")+'"></span>';}
+  return o+'</span>';
 }
 
 // === STATE ===
 var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pack",
   pack:{log:[],won:0,spent:0,af:false,pr:10,pk:50,nm:"",aa:100,ew:13},
-  sessions:JSON.parse(localStorage.getItem("txs6")||"[]"),
+  sessions:JSON.parse(localStorage.getItem("txs7")||"[]"),
   _promptPreview:null,_allPromptPreview:null,_promptMsg:null,
-  bankroll:Number(localStorage.getItem("txb6")||"1000")};
+  bankroll:Number(localStorage.getItem("txb7")||"1000")};
 
-// === INIT: auto-fetch, no hardcoded data ===
+// === INIT ===
 function init(){
-  // Try cached data for instant render
-  try{var c=localStorage.getItem("txr_gd6");if(c){GD=JSON.parse(c);if(GD.length)S.data=GD.map(function(g){var a=analyze(g);a.ps=analyzePackStructure(a);integratePS(a);return a;})}}catch(e){}
-  DD=localStorage.getItem("txr_date6")||"";
-  render();
-  refreshAllData();
+  try{var c=localStorage.getItem("txr_gd7");if(c){GD=JSON.parse(c);if(GD.length)S.data=GD.map(function(g){return analyze(g)})}}catch(e){}
+  DD=localStorage.getItem("txr_date7")||"";
+  render();refreshAllData();
 }
-
 function setTab(t){S.tab=t;render()}
 function setMore(t){S.moreTab=t;render()}
 function setFilter(p){S.filterPr=p;render()}
@@ -730,1124 +533,371 @@ function setSort(s){S.sortBy=s;render()}
 function openDetail(id){S.selId=id;S.tab="detail";render()}
 function setSel(id){S.selId=id;render()}
 
-// === DATA LOADING — feed.json ONLY, zero fallbacks ===
+// === DATA LOADING (unchanged) ===
 var DATA_URL="data/feed.json";
 var WINNER_URL="data/wdata.json";
 
 async function refreshAllData(){
-  if(S._refreshing)return;S._refreshing=true;S._refreshMsg="Fetching data...";render();
+  if(S._refreshing)return;S._refreshing=true;S._refreshMsg="Fetching...";render();
   try{
-    var resp=await fetch(DATA_URL);
-    if(!resp.ok)throw new Error("HTTP "+resp.status);
+    var resp=await fetch(DATA_URL);if(!resp.ok)throw new Error("HTTP "+resp.status);
     var json=await resp.json();
     if(json&&json.games&&json.games.length>0){
-      // Replace GD entirely — feed.json is ground truth
       GD=[];
       json.games.forEach(function(ng){
-        if(!ng.pz||ng.pz.length===0||!ng.pr||ng.pr<=0)return;
-        ng.id=String(ng.gn);
-        ng.pz.sort(function(a,b){return b.a-a.a});
-        // Keep whatever the scraper provided — no fallback estimates
-        GD.push(ng);
+        if(!ng.pz||!ng.pz.length||!ng.pr||ng.pr<=0)return;
+        ng.id=String(ng.gn);ng.pz.sort(function(a,b){return b.a-a.a});GD.push(ng);
       });
-      S.data=GD.map(function(g){var a=analyze(g);a.ps=analyzePackStructure(a);integratePS(a);return a;});
+      S.data=GD.map(function(g){return analyze(g)});
       DD=json.updated||"";
-      localStorage.setItem("txr_date6",DD);
-      localStorage.setItem("txr_gd6",JSON.stringify(GD));
+      localStorage.setItem("txr_date7",DD);localStorage.setItem("txr_gd7",JSON.stringify(GD));
+      saveTrend();
       var comp=S.data.filter(function(a){return a.complete}).length;
-      S._refreshMsg="Loaded "+GD.length+" games ("+comp+" complete). Data: "+DD;
-    }else{
-      S._refreshMsg="No data in feed.json. Run scraper first.";
-    }
-  }catch(e){
-    S._refreshMsg="Failed: "+e.message+". Deploy feed.json via scraper.";
-  }
+      var jk=S.data.filter(function(a){return a.btpInfo.hasJackpot}).length;
+      S._refreshMsg="Loaded "+GD.length+" games ("+comp+" complete, "+jk+" with jackpot). Data: "+DD;
+    }else{S._refreshMsg="No data. Run scraper.";}
+  }catch(e){S._refreshMsg="Failed: "+e.message;}
   S._refreshing=false;render();
 }
 
-// === WINNER DATA ===
 async function fetchWinners(){
   if(S._fetching)return;S._fetching=true;render();
   if(!S.winData)S.winData={};
-  try{
-    var resp=await fetch(WINNER_URL);
-    if(resp.ok){
-      var json=await resp.json();
-      if(json&&json.winners){
-        S.winData=json.winners;
-        localStorage.setItem("txwd6",JSON.stringify(S.winData));
-        localStorage.setItem("txwd_date6",json.updated||"");
-      }
-    }
-  }catch(e){}
+  try{var r=await fetch(WINNER_URL);if(r.ok){var j=await r.json();if(j&&j.winners){S.winData=j.winners;localStorage.setItem("txwd7",JSON.stringify(S.winData));}}}catch(e){}
   S._fetching=false;render();
 }
 
-// === PACK TRACKER ===
+// === PACK TRACKER (unchanged) ===
 function scratch(amt){var pk=S.pack;pk.log.push({amt:amt,w:amt>0});pk.won+=amt;pk.spent+=pk.pr;pk.af=pk.af||amt>=pk.aa;render()}
 function resetPack(){S.pack.log=[];S.pack.won=0;S.pack.spent=0;S.pack.af=false;render()}
-function saveSession(){if(!S.pack.log.length)return;S.sessions.push({g:S.pack.nm,s:S.pack.spent,w:S.pack.won,t:S.pack.log.length,d:new Date().toLocaleDateString(),af:S.pack.af});localStorage.setItem("txs6",JSON.stringify(S.sessions));resetPack()}
-function clearSess(){S.sessions=[];localStorage.setItem("txs6","[]");render()}
-function setBR(v){S.bankroll=v;localStorage.setItem("txb6",String(v));render()}
+function saveSession(){if(!S.pack.log.length)return;S.sessions.push({g:S.pack.nm,s:S.pack.spent,w:S.pack.won,t:S.pack.log.length,d:new Date().toLocaleDateString(),af:S.pack.af});localStorage.setItem("txs7",JSON.stringify(S.sessions));resetPack()}
+function clearSess(){S.sessions=[];localStorage.setItem("txs7","[]");render()}
+function setBR(v){S.bankroll=v;localStorage.setItem("txb7",String(v));render()}
 function startPack(id){var a;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;S.pack={log:[],won:0,spent:0,af:false,pr:a.g.pr,pk:a.g.pk,nm:a.g.nm+' #'+a.g.gn,aa:a.aa,ew:Math.round(a.g.pk/a.g.odds)};S.tab="more";S.moreTab="pack";render()}
+function mkv(){var pk=S.pack,rem=pk.pk-pk.log.length;if(rem<=0)return null;var wf=0;for(var i=0;i<pk.log.length;i++)if(pk.log[i].w)wf++;var wl=Math.max(0,pk.ew-wf),pW=wl/rem,pA=pk.af?0:1/rem;var dec="EARLY",rsn="Pack early — "+(pA*100).toFixed(1)+"% per ticket.";if(pk.af){dec="STOP";rsn="Anchor found.";}else if(pA>=0.15){dec="BUY";rsn=(pA*100).toFixed(1)+"% anchor chance. "+rem+" left.";}else if(pA>=0.05){dec="CONSIDER";rsn=(pA*100).toFixed(1)+"% per ticket.";}return{rem:rem,wl:wl,pW:pW,pA:pA,dec:dec,rsn:rsn}}
 
-// === AI PROMPT GENERATORS ===
+// === AI PROMPTS (streamlined for v7) ===
 function buildGamePrompt(a){
-  var lines=[];
-  var g=a.g;
-  var packPrice=g.pk*g.pr;
-  
-  lines.push("Analyze this Texas scratch-off game and tell me if it's worth buying. Focus on whether top-tier prizes are more likely to be in remaining packs than normal.\n");
-  
-  // === FRAMEWORK EXPLANATION ===
-  lines.push("═══════════════════════════════════════════");
-  lines.push("HOW THIS DATA WORKS");
-  lines.push("═══════════════════════════════════════════");
-  lines.push("Texas lottery sells scratch-offs in PACKS (e.g. 50 tickets at $10 = $500 pack). Each pack has a guaranteed minimum prize total (floor guarantee). Texas publishes how many prizes at each level were printed and how many have been claimed. From this data we derive everything below.");
-  lines.push("");
-  lines.push("KEY CONCEPTS:");
-  lines.push("- PACK: A sealed bundle of consecutive tickets. Retailer buys whole packs. You can buy individual tickets or entire packs.");
-  lines.push("- BTP (Base Ticket Prize): The highest prize tier that appears roughly once per pack (~0.5 to 2.0 per pack). This is the 'normal' best win. Prizes BELOW BTP are guaranteed small wins. Prizes ABOVE BTP are the outlier jackpots.");
-  lines.push("- BTP ZONE: Some games have multiple tiers in the BTP zone:");
-  lines.push("  - PRIMARY BTP: ratio ≥ 0.5 per pack (appears in most packs)");
-  lines.push("  - SECONDARY BTP: ratio ≥ 0.2 per pack (appears in ~1 of 5 packs)");
-  lines.push("  - MID-TIER BTP: ratio ≥ 0.05 per pack (appears in ~1 of 20 packs)");
-  lines.push("  - SINGLE/DUAL/TRIPLE: how many tiers are in the BTP zone");
-  lines.push("- ABOVE-BTP: Prize tiers ABOVE the BTP zone. These are the outlier prizes. A pack with an above-BTP prize is a 'winner pack' — it returns significantly more than pack cost. Only a fraction of packs contain above-BTP prizes.");
-  lines.push("- FLOOR: Lottery-published guaranteed minimum prize total per pack. The pack CANNOT return less than this amount. This is a FACT, not an estimate.");
-  lines.push("- IMPLIED YIELD: The yield percentage at which the dollar-based packs-sold estimate (Method C) matches the BTP-clock estimate (Method A). This tells us the actual observed return rate of BTP-only packs for THIS specific game.");
-  lines.push("- JACKPOT EV: Expected value contributed by above-BTP prizes per pack. Calculated as Σ(prize_amount × remaining_prizes / remaining_packs) for each above-BTP tier.");
-  lines.push("");
-  
-  // === METRIC DEFINITIONS ===
-  lines.push("METRIC DEFINITIONS:");
-  lines.push("- Designed return: total_prize_value / (total_tickets × ticket_price). The mathematical average return built into the game at printing.");
-  lines.push("- Sold return: claimed_prize_$ / sold_tickets. What already-sold tickets actually returned per dollar.");
-  lines.push("- Remaining return: remaining_prize_$ / (remaining_tickets × ticket_price). What unsold tickets are currently worth per dollar.");
-  lines.push("- Return gap: (remaining_return - sold_return) / sold_return. Positive = remaining packs richer. BUT this is driven by ALL prizes including mid-range, not just top prizes.");
-  lines.push("- Density shift: (remaining_prizes / remaining_packs) / (printed_prizes / total_packs). Per-tier concentration metric. >1.0 = that prize tier is MORE concentrated in remaining packs than at launch. This is the KEY metric for top prizes.");
-  lines.push("- Hypergeometric P(pack): Probability of at least 1 top-tier prize in a single pack, calculated via hypergeometric distribution (exact, not approximation). The ratio vs launch tells you if odds genuinely improved.");
-  lines.push("- Markov velocity: Compares each above-BTP tier's claim rate vs the BTP tier's claim rate. If BTP is 60% claimed but $500K is only 40% claimed, the $500K is UNDERCLAIMED — meaning those prizes are disproportionately still in unsold packs.");
-  lines.push("- Packs sold validation: Three independent methods estimate packs sold:");
-  lines.push("  - Method A (BTP Clock): BTP_claimed / BTP_printed × total_packs. Most reliable — BTP appears in every pack so its claim rate = sales pace.");
-  lines.push("  - Method B (Prize Count): total_claimed_prizes / (pack_size / overall_odds). Cross-check using prize frequency.");
-  lines.push("  - Method C ($Yield): total_claimed_$ / (pack_price × yield%). Dollar-based estimate. Depends on yield assumption.");
-  lines.push("  - Confidence: HIGH = all 3 agree within 5%. MEDIUM = within 10%. LOW = >10% spread. LOW means packs-sold estimate may be wrong, which affects all downstream calculations.");
-  lines.push("- EV Projections: Pack expected value at different yield assumptions. Shows how sensitive the edge calculation is to yield uncertainty.");
-  lines.push("- Signal stability: STABLE = Method A falls within projection range. MARGINAL = within 20%. UNSTABLE = outside by >20%.");
-  lines.push("- Score: 0-100 composite. Base 50, adjusted by: return gap (±15), hypergeometric shift (±10), Markov signal (±10), top prize availability (±20), win odds shift (±5), closing bonus/penalty (±10), remaining vs designed return (±5), data completeness (-5), density shift (±8), jackpot EV shift (±5). LOW confidence or UNSTABLE signals dampen score toward 50.");
-  lines.push("");
-  
-  // === GAME IDENTITY ===
-  lines.push("═══════════════════════════════════════════");
-  lines.push("GAME: "+g.nm+" #"+g.gn+" ($"+g.pr+" ticket)");
-  lines.push("═══════════════════════════════════════════");
-  lines.push("Ticket price: $"+g.pr);
-  lines.push("Pack size: "+g.pk+" tickets/pack = $"+fN(packPrice)+" per pack");
-  lines.push("Total tickets printed: "+fN(g.tot));
-  lines.push("Total packs: "+fN(a.pc));
-  if(g.guar)lines.push("Guaranteed floor: $"+fN(g.guar)+" per pack ("+(a.ps&&a.ps.valid?pct(a.ps.floorPct):(g.guar/packPrice*100).toFixed(1)+"%")+" of pack price)");
-  if(g.odds)lines.push("Published overall odds: 1 in "+g.odds+" (1 winner per "+g.odds+" tickets)");
-  if(g.cs)lines.push("⚠ THIS GAME IS CLOSING — being pulled from stores");
-  lines.push("Data complete: "+(a.complete?"YES":"NO — missing "+(g.tot<=0?"total tickets ":"")+(g.pk<=0?"pack size ":"")+(g.guar<=0?"floor guarantee ":"")+(g.odds<=0?"odds ":"")));
-  lines.push("");
-  
-  // === CURRENT STATUS ===
-  lines.push("CURRENT STATUS:");
-  lines.push("Score: "+a.sc+"/100");
-  lines.push("Maturity: "+pct(a.mat)+" sold ("+fN(a.ets)+" of "+fN(g.tot)+" tickets)");
-  lines.push("Packs sold: ~"+fN(a.eps)+" of "+fN(a.pc)+" total packs");
-  lines.push("Packs remaining: ~"+fN(a.epr));
-  lines.push("Tickets remaining: ~"+fN(a.etr));
-  lines.push("BTP: $"+fN(a.aa)+" — claim rate: "+pct(a.acr)+(a.btpValid?" (validated against designed return)":" (unvalidated)"));
-  lines.push("");
-  
-  // === PRIZE VALUE ANALYSIS ===
-  lines.push("PRIZE VALUE:");
-  lines.push("Total prize value printed: "+fmt(a.tpvp));
-  lines.push("Prize value claimed: "+fmt(a.tpvc));
-  lines.push("Prize value remaining: "+fmt(a.tpvr));
-  lines.push("Total remaining individual winners: "+fN(a.totRem));
-  lines.push("");
-  
-  // === RETURN ANALYSIS ===
-  lines.push("RETURN ANALYSIS:");
-  lines.push("Designed return: "+pct(a.designedReturn)+" (built into prize structure at printing)");
-  lines.push("Sold return: "+(a.soldReturn>0?"$"+(a.soldReturn/g.pr).toFixed(4)+" per $1 spent ("+pct(a.soldReturn/g.pr)+")":"N/A"));
-  lines.push("Remaining return: "+pct(a.remainReturnPct)+" per ticket dollar");
-  lines.push("Return gap: "+(a.returnGap>0?"+":"")+pct(a.returnGap)+" — "+(a.returnGap>0?"remaining packs return MORE per dollar than sold packs":"remaining packs return LESS per dollar than sold packs"));
-  lines.push("Win odds now: 1:"+a.winOdds.toFixed(2)+(g.odds?" (published at launch: 1:"+g.odds+", "+(a.winOdds<g.odds?"IMPROVED":"WORSE")+" now)":""));
-  lines.push("");
-  
-  // === TOP PRIZE ===
-  lines.push("TOP PRIZE:");
-  lines.push("$"+fN(a.tp.a)+" — "+a.tpr+" of "+a.tp.p+" remaining ("+(a.tpr===0?"ALL GONE":pct(a.tpr/a.tp.p)+" left")+")");
-  if(a.epr>0&&a.tpr>0){
-    lines.push("Current odds: 1 in "+fN(Math.round(a.epr/a.tpr))+" packs (was 1 in "+fN(Math.round(a.pc/a.tp.p))+" at launch)");
-    lines.push("Top prize P(in a pack): now "+(a.tpPack>=0.001?pct(a.tpPack):"1 in "+fN(Math.round(1/a.tpPack))+" packs"));
-  }
-  if(a.tpr===0)lines.push("*** ALL TOP PRIZES ARE GONE — no $"+fN(a.tp.a)+" prizes remain ***");
-  lines.push("");
-  
-  // === HYPERGEOMETRIC ===
-  lines.push("TOP-TIER HYPERGEOMETRIC PROBABILITY:");
-  lines.push("P(at least 1 TOP-category prize in a pack):");
-  lines.push("  Now: "+(a.hyperNow>=0.01?pct(a.hyperNow):"1 in "+fN(Math.round(1/a.hyperNow))));
-  lines.push("  At launch: "+(a.hyperLaunch>=0.01?pct(a.hyperLaunch):"1 in "+fN(Math.round(1/a.hyperLaunch))));
-  lines.push("  Ratio: "+a.hyperRatio.toFixed(3)+"x"+(a.hyperRatio>1.05?" — odds IMPROVED":a.hyperRatio<0.95?" — odds WORSENED":" — roughly unchanged"));
-  lines.push("");
-  
-  // === ABOVE vs BELOW BTP POOL HEALTH ===
-  lines.push("POOL HEALTH — ABOVE vs BELOW BTP:");
-  lines.push("Above-BTP claim rate: "+pct(a.abvPct)+" (outlier prizes — should track near maturity of "+pct(a.mat)+")");
-  lines.push("Below-BTP claim rate: "+pct(a.blwPct)+" (base prizes — should track near maturity)");
-  if(a.abvPct<a.mat*0.85)lines.push("→ Outlier prizes LAGGING behind sales pace — remaining packs are ENRICHED with above-BTP prizes");
-  else if(a.abvPct>a.mat*1.15)lines.push("→ Outlier prizes claimed FASTER than sales pace — remaining packs DEPLETED of above-BTP prizes");
-  else lines.push("→ Claims tracking near expected sales pace");
-  lines.push("Above-BTP prizes per remaining pack: "+a.orpC.toFixed(3)+" (was "+a.orpO.toFixed(3)+" at launch, shift: "+(a.orpS>0?"+":"")+a.orpS.toFixed(1)+"%)");
-  lines.push("");
-  
-  // === MARKOV VELOCITY ===
-  lines.push("MARKOV VELOCITY:");
-  lines.push("Overall signal: "+a.gm.sig+" — "+a.gm.rsn);
-  lines.push("Per-tier breakdown (above-BTP tiers):");
-  a.gm.ts.forEach(function(t){
-    lines.push("  $"+fN(t.a)+" ["+t.cat+"] — claim rate: "+pct(t.ar)+" vs BTP expected: "+pct(t.er)+" → deviation: "+(t.dev>0?"+":"")+(t.dev*100).toFixed(1)+"% → "+t.sig+(t.rem>0?" ("+fN(t.rem)+" remaining)":" (GONE)"));
-  });
-  lines.push("");
-  
-  // === FULL PRIZE TABLE ===
-  lines.push("FULL PRIZE TABLE:");
-  lines.push("Prize | Category | Printed | Claimed | Remaining | %Left | Launch Odds | Current Odds | Under/Overclaimed");
-  a.prizes.forEach(function(p){
-    var cr=p.p>0?p.c/p.p:0;
-    var claimStatus=p.isA?"BTP_TIER":(cr<a.acr*0.95?"UNDERCLAIMED":cr>a.acr*1.05?"OVERCLAIMED":"NORMAL");
-    lines.push("$"+fN(p.a)+" | "+p.cat+(p.isA?" (BTP)":"")+" | "+fN(p.p)+" | "+fN(p.c)+" | "+fN(p.rem)+" | "+(100-p.pctC).toFixed(0)+"% | "+fmtO(p.origO)+" | "+(p.rem>0?fmtO(p.currO):"GONE")+" | "+claimStatus);
-  });
-  lines.push("");
-  
-  // === TIER ADVANTAGE (odds improvement per tier) ===
-  if(a.tierAdv.length>0){
-    lines.push("TIER ADVANTAGE — CURRENT vs LAUNCH ODDS (above-BTP tiers with prizes remaining):");
-    a.tierAdv.forEach(function(t){
-      lines.push("  $"+fN(t.a)+" ["+t.cat+"] — launch: "+fmtO(t.origO)+" → now: "+fmtO(t.currO)+" → "+(t.pctB>0?"+":"")+t.pctB.toFixed(1)+"% "+(t.pctB>0?"BETTER":"WORSE")+" odds ("+fN(t.rem)+" remaining)");
-    });
-    lines.push("");
-  }
-  
-  // === PACK STRUCTURE ===
-  if(a.ps&&a.ps.valid){
-    var ps=a.ps;
-    lines.push("═══════════════════════════════════════════");
-    lines.push("PACK STRUCTURE ANALYSIS");
-    lines.push("═══════════════════════════════════════════");
-    
-    lines.push("BTP Zone: "+ps.btpType);
-    ps.btpZone.forEach(function(t){
-      lines.push("  $"+fN(t.a)+" — "+t.role+" — "+t.ratio.toFixed(2)+" per pack ("+(t.ratio>=1?"appears in every pack":t.ratio>=0.5?"appears in ~"+(t.ratio*100).toFixed(0)+"% of packs":t.ratio>=0.2?"~1 in "+Math.round(1/t.ratio)+" packs":"~1 in "+Math.round(1/t.ratio)+" packs")+")");
-    });
-    lines.push("Zone ceiling: $"+fN(ps.zoneCeiling)+" — everything above this is an outlier prize (above-BTP)");
-    lines.push("");
-    
-    lines.push("PACKS SOLD VALIDATION:");
-    lines.push("  Method A (BTP Clock): "+fN(ps.methodA)+" packs");
-    lines.push("  Method B (Prize Count): "+fN(ps.methodB)+" packs");
-    lines.push("  Method C ($Yield @"+pct(ps.impliedYield)+"): "+fN(ps.methodC)+" packs");
-    lines.push("  Confidence: "+ps.confidence);
-    lines.push("  Implied yield: "+pct(ps.impliedYield)+" (the yield % where Method C equals Method A)");
-    lines.push("  Floor: "+pct(ps.floorPct)+" ($"+fN(Math.round(packPrice*ps.floorPct))+") — implied yield should be between floor and ~80%");
-    lines.push("  Yield valid: "+(ps.yieldValid?"YES — implied yield is in reasonable range":"NO — implied yield outside expected range, signals may be unreliable"));
-    lines.push("");
-    
-    lines.push("REMAINING PACK COMPOSITION:");
-    lines.push("  Total remaining packs: "+fN(ps.packsRemaining));
-    lines.push("  Packs with above-BTP prizes: "+fN(ps.abvRemaining)+" ("+(ps.packsRemaining>0?pct(ps.abvRemaining/ps.packsRemaining):"0%")+")");
-    lines.push("  BTP-only packs (no outlier): "+fN(ps.btpOnlyRemaining)+" ("+(ps.packsRemaining>0?pct(ps.btpOnlyRemaining/ps.packsRemaining):"0%")+")");
-    lines.push("  Above-BTP prizes printed: "+fN(ps.abvPrinted)+" | claimed: "+fN(ps.abvClaimed)+" | remaining: "+fN(ps.abvRemaining));
-    lines.push("  Overall above-BTP density shift: "+ps.overallShift.toFixed(2)+"x vs launch"+(ps.overallShift>=1.2?" (CONCENTRATED)":ps.overallShift<=0.8?" (DEPLETED)":" (NEUTRAL)"));
-    lines.push("");
-    
-    // Density shifts
-    if(ps.densityShifts.length>0){
-      lines.push("DENSITY SHIFTS (per above-BTP tier, remaining vs launch):");
-      ps.densityShifts.forEach(function(d){
-        lines.push("  $"+fN(d.a)+": "+d.shift.toFixed(2)+"x — "+fN(d.remaining)+" of "+fN(d.printed)+" left — now 1:"+fN(d.currentOdds)+" packs (was 1:"+fN(d.launchOdds)+") → "+d.signal);
-      });
-      lines.push("");
-    }
-    
-    lines.push("PACK STRUCTURE SIGNAL: "+ps.signal+" — "+ps.signalReason);
-    lines.push("Signal stability: "+ps.signalStability);
-    lines.push("");
-    
-    // EV Projections
-    if(ps.evProjections&&ps.evProjections.length>0){
-      lines.push("EV PROJECTIONS (per pack, $"+fN(packPrice)+" cost):");
-      lines.push("These show expected pack value at different yield assumptions. The 'implied yield' row (marked ◄) is where data says this game actually operates.");
-      lines.push("Jackpot EV/pack now: $"+ps.jackpotEV.toFixed(2)+" (above-BTP expected value per remaining pack)");
-      lines.push("Jackpot EV/pack at launch: $"+ps.jackpotEVLaunch.toFixed(2));
-      lines.push("Jackpot EV shift: "+ps.jackpotEVShift.toFixed(2)+"x"+(ps.jackpotEVShift>1.05?" — jackpot value CONCENTRATED in remaining packs":ps.jackpotEVShift<0.95?" — jackpot value DEPLETED from remaining packs":" — roughly unchanged"));
-      lines.push("");
-      lines.push("Yield | Base EV | Jackpot EV | Total EV | Edge vs Cost | Method C Packs");
-      ps.evProjections.forEach(function(ev){
-        var isImplied=Math.abs(ev.yield-ps.impliedYield)<0.02;
-        lines.push((isImplied?"► ":"  ")+ev.label+": $"+Math.round(ev.baseEV)+" + $"+ev.jackpotEV.toFixed(2)+" = $"+Math.round(ev.totalEV)+" | edge: "+(ev.edge>0?"+":"")+pct(ev.edge)+" | MC="+fN(ev.methodC)+(isImplied?" ◄ IMPLIED":""));
-      });
-      lines.push("");
-    }
-  }
-  
-  // === FLAGS / SIGNALS ===
-  if(a.flags.length>0){
-    lines.push("ACTIVE FLAGS:");
-    a.flags.forEach(function(fl){
-      lines.push("  ["+fl.t+"] "+fl.m);
-    });
-    lines.push("");
-  }
-  
-  // === CONTRADICTIONS ===
-  var contras=[];
-  if(a.returnGap>0.03&&a.hyperRatio<0.95)contras.push("Return gap is positive (+"+pct(a.returnGap)+") but top-tier hypergeometric is worse than launch ("+a.hyperRatio.toFixed(2)+"x). Dollar value enriched overall, but top prizes specifically may be depleted. Mid-range prizes are driving the positive return gap.");
-  if(a.returnGap<-0.03&&a.hyperRatio>1.05)contras.push("Return gap is negative ("+pct(a.returnGap)+") but top-tier odds improved ("+a.hyperRatio.toFixed(2)+"x). Mid-range prizes depleted but top prizes concentrated in remaining packs. For pack buyers targeting jackpots, this is actually favorable.");
-  if((a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY")&&a.returnGap<-0.01)contras.push("Markov says "+a.gm.sig+" (top prizes underclaimed) but return gap is negative ("+pct(a.returnGap)+"). Count-based vs dollar-based signals disagree. Likely: top prize counts are favorable but dollar values of mid-range prizes are depleted.");
-  if(a.ps&&a.ps.valid){
-    if(a.gm.sig==="AVOID"&&a.ps.signal==="BUY")contras.push("Markov says AVOID but pack structure says BUY. Velocity-based vs density-based signals disagree.");
-    if(a.gm.sig==="BUY"&&a.ps.signal==="AVOID")contras.push("Markov says BUY but pack structure says AVOID. Velocity-based vs density-based signals disagree.");
-    if(a.ps.confidence==="LOW")contras.push("Confidence is LOW — the three packs-sold estimation methods disagree by >10%. All density shifts, EV calculations, and pack composition numbers depend on packs-sold estimate. Treat signals with caution.");
-    if(a.ps.signalStability==="UNSTABLE")contras.push("Signal stability is UNSTABLE — Method A (BTP clock) falls outside the yield projection range. The yield assumption significantly affects the analysis. Density and EV numbers may not be reliable.");
-  }
-  if(a.abvPct<a.mat*0.7&&a.returnGap<0)contras.push("Above-BTP claims LAG sales by "+(((a.mat-a.abvPct)/a.mat)*100).toFixed(0)+"% but return gap is still negative. Base/mid prizes overclaimed while top prizes sit in unsold packs — density shift and return gap tell different stories.");
-  if(contras.length>0){
-    lines.push("═══════════════════════════════════════════");
-    lines.push("CONTRADICTIONS TO RESOLVE");
-    lines.push("═══════════════════════════════════════════");
-    contras.forEach(function(c){lines.push("• "+c)});
-    lines.push("");
-  }
-  
-  // === SCORE BREAKDOWN ===
-  lines.push("SCORE BREAKDOWN (how the "+a.sc+"/100 score was calculated):");
-  lines.push("Base: 50");
-  var scItems=[];
-  if(a.returnGap!==0)scItems.push("Return gap ("+pct(a.returnGap)+"): "+(a.returnGap>0?"+":"")+Math.max(-15,Math.min(15,Math.round(a.returnGap*100)))+" pts");
-  if(a.hyperRatio>0)scItems.push("Hypergeometric ("+a.hyperRatio.toFixed(2)+"x): "+(a.hyperRatio>=1?"+":"")+Math.max(-10,Math.min(10,Math.round((a.hyperRatio-1)*20)))+" pts");
-  var mkPtsMap={"STRONG_BUY":10,"BUY":5,"NEUTRAL":0,"MIXED":0,"CAUTION":-3,"AVOID":-8,"DEAD":-15};
-  scItems.push("Markov ("+a.gm.sig+"): "+(mkPtsMap[a.gm.sig]>0?"+":"")+mkPtsMap[a.gm.sig]+" pts");
-  if(a.tpr===0)scItems.push("Top prize gone: -20 pts");else if(a.tp.p>0)scItems.push("Top prize ("+a.tpr+"/"+a.tp.p+"): +"+Math.min(3,Math.round((a.tpr/a.tp.p)*3))+" pts");
-  if(!a.complete)scItems.push("Incomplete data: -5 pts");
-  if(a.ps&&a.ps.valid){
-    if(a.ps.topShift)scItems.push("Density shift ("+a.ps.topShift.shift.toFixed(2)+"x): "+((a.ps.topShift.shift-1)*10>0?"+":"")+Math.max(-8,Math.min(8,Math.round((a.ps.topShift.shift-1)*10)))+" pts");
-    if(a.ps.jackpotEVShift>0)scItems.push("Jackpot EV shift ("+a.ps.jackpotEVShift.toFixed(2)+"x): "+((a.ps.jackpotEVShift-1)*10>0?"+":"")+Math.max(-5,Math.min(5,Math.round((a.ps.jackpotEVShift-1)*10)))+" pts");
-    if(a.ps.confidence==="LOW")scItems.push("LOW confidence dampening: score pulled 30% toward 50");
-    if(a.ps.signalStability==="UNSTABLE")scItems.push("UNSTABLE signal dampening: score pulled 20% toward 50");
-  }
-  scItems.forEach(function(s){lines.push("  "+s)});
-  lines.push("  Final: "+a.sc);
-  lines.push("");
-  
-  // === QUESTIONS ===
-  lines.push("═══════════════════════════════════════════");
-  lines.push("ANALYSIS REQUESTED");
-  lines.push("═══════════════════════════════════════════");
-  lines.push("1. Is this game a good buy right now? Give a clear YES/NO/MAYBE with confidence level (HIGH/MEDIUM/LOW).");
-  lines.push("2. Are the top-tier prizes ($"+fN(a.tp.a)+") more concentrated in remaining packs than at launch? Cite the specific density shift and hypergeometric data.");
-  lines.push("3. What's the single most important factor in your recommendation? (Which metric matters most for THIS specific game?)");
-  lines.push("4. If I buy one pack ($"+fN(packPrice)+"), what's my realistic expected outcome? Break it down: guaranteed floor, likely BTP-zone return, jackpot EV.");
-  lines.push("5. Are there any contradictions in the data that undermine confidence? How do you reconcile them?");
-  lines.push("6. What specific maturity % or event would you wait for before buying (or would trigger avoiding)?");
-  return lines.join("\n");
+  var g=a.g,L=[];
+  L.push("Analyze TX scratch-off #"+g.gn+" "+g.nm+" ($"+g.pr+"). Focus: are jackpot prizes ($10K+) concentrated in remaining packs?\n");
+  L.push("FACTS: $"+g.pr+" ticket | "+g.pk+"/pack=$"+fN(a.packPrice)+" | "+fN(a.totalTickets)+" tickets | "+fN(a.pc)+" packs | Floor:$"+fN(g.guar)+" ("+pct(g.guar/a.packPrice)+") | Odds:1:"+g.odds+" | BTP:$"+fN(a.aa)+(a.btpValid?" validated":"")+(g.cs?" | CLOSING":""));
+  L.push("STATUS: Score:"+a.sc+" | "+pct(a.mat)+" sold | "+fN(a.epr)+" packs left | Signal:"+a.gm.sig+"\n");
+  L.push("JACKPOT TIERS:");
+  a.jackpotShifts.forEach(function(j){L.push("  $"+fN(j.a)+": "+j.remaining+"/"+j.printed+" | density:"+j.shift.toFixed(2)+"x | odds:1:"+fN(j.currentOdds)+" (was 1:"+fN(j.launchOdds)+") | "+j.signal);});
+  L.push("JK EV/pack: $"+a.jackpotEV.toFixed(2)+" (launch:$"+a.jackpotEVLaunch.toFixed(2)+", "+a.jackpotEVShift.toFixed(2)+"x) | P(jk): "+(a.hyperNow>=0.01?pct(a.hyperNow):"1:"+fN(Math.round(1/a.hyperNow)))+" ("+a.hyperRatio.toFixed(2)+"x)\n");
+  L.push("EV: Floor:$"+fN(a.floorEV)+" + Mid:$"+a.midRangeEV.toFixed(0)+" + JK:$"+a.jackpotEV.toFixed(2)+" = $"+Math.round(a.totalEV)+" | Edge:"+(a.edge>0?"+":"")+pct(a.edge));
+  L.push("Validation: A="+fN(a.methodA)+" B="+fN(a.methodB)+" C="+fN(a.methodC)+" Conf:"+a.confidence+"\n");
+  L.push("PRIZE TABLE:");a.prizes.forEach(function(p){L.push("$"+fN(p.a)+" "+p.cat+" | "+fN(p.p)+"/"+fN(p.c)+"/"+fN(p.rem)+" | "+fmtO(p.origO)+"→"+(p.rem>0?fmtO(p.currO):"GONE"));});
+  L.push("\n1. Worth buying? YES/NO/MAYBE. 2. Jackpots concentrated? 3. Pack breakdown: floor+mid+jackpot. 4. Contradictions?");
+  return L.join("\n");
 }
-
 function buildAllPrompt(){
-  var triggered=[];
-  S.data.forEach(function(a){
-    if(!a.complete)return;
-    var dominated=false;
-    if(a.hyperRatio>1.1||a.returnGap>0.03||(a.tpr===a.tp.p&&a.mat>0.2)||(a.g.cs&&a.tpr>0)||((a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY")&&a.tpr>0))dominated=true;
-    if(a.gm.sig==="AVOID"||a.gm.sig==="DEAD"||a.returnGap<-0.03)dominated=true;
-    if(dominated)triggered.push(a);
-  });
-  if(triggered.length===0)return"No games with significant signals to analyze.";
-  
-  var lines=[];
-  lines.push("You are a Texas scratch-off analyst. Analyze this data and give me actionable insights. Focus on which games have top-tier prizes that are more likely to be in remaining packs than expected.\n");
-  lines.push("METRICS:");
-  lines.push("- density: top prize density shift vs launch. >1.0 = top prizes MORE concentrated in remaining packs. 1.5x+ = strong signal. <0.8 = depleted.");
-  lines.push("- gap: return gap. Positive = remaining packs return more $/ticket than sold packs. Driven mostly by mid-range prizes, not top prizes.");
-  lines.push("- markov: BUY/STRONG_BUY = top prizes underclaimed vs sales pace. AVOID = top prizes depleting faster than tickets selling. DEAD = all top gone.");
-  lines.push("- top: remaining/total top prizes and their value");
-  lines.push("- hyper: hypergeometric probability ratio of top-tier prize in a pack NOW vs at LAUNCH. >1.0 = better odds now.");
-  lines.push("- confidence: HIGH = three independent packs-sold estimates agree within 5% (BTP clock, prize count, dollar yield). MEDIUM = within 10%. LOW = unreliable.");
-  lines.push("- IMPORTANT: density shift is the most direct signal for 'are top prizes concentrated in fewer remaining packs'. Return gap tells you about average pack value. These can contradict — density can be >1.0 while gap is negative, or vice versa.\n");
-  lines.push("DATA ("+triggered.length+" games with signals):\n");
-  triggered.sort(function(a,b){return b.sc-a.sc}).forEach(function(a){
-    lines.push("#"+a.g.gn+" "+a.g.nm+" $"+a.g.pr+
-      " | score:"+a.sc+
-      " | density:"+(a.ps&&a.ps.valid&&a.ps.topShift?a.ps.topShift.shift.toFixed(2)+"x":"—")+
-      " | gap:"+(a.returnGap>0?"+":"")+(a.returnGap*100).toFixed(1)+"%"+
-      " | markov:"+a.gm.sig+
-      " | top:"+a.tpr+"/"+a.tp.p+" ($"+fN(a.tp.a)+")"+
-      " | sold:"+(a.mat*100).toFixed(1)+"%"+
-      " | hyper:"+a.hyperRatio.toFixed(2)+"x"+
-      " | confidence:"+(a.ps&&a.ps.valid?a.ps.confidence:"—")+
-      " | packs:"+fN(a.epr)+
-      (a.g.cs?" | CLOSING":""));
-  });
-  lines.push("\nQUESTIONS:");
-  lines.push("1. What are the top 2-3 games to buy right now and why?");
-  lines.push("2. Any unusual cross-game patterns?");
-  lines.push("3. Which 1-2 games should I avoid?");
-  lines.push("4. Best pick at each price point ($1, $2, $3, $5, $10, $20, $30, $50, $100)?");
-  return lines.join("\n");
+  var tr=[];S.data.forEach(function(a){if(!a.complete||!a.btpInfo.hasJackpot)return;
+    if(a.jackpotDensityShift>1.1||a.hyperRatio>1.1||a.returnGap>0.03||a.g.cs&&a.tpr>0||a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY"||a.gm.sig==="AVOID"||a.gm.sig==="DEAD"||a.returnGap<-0.03)tr.push(a);});
+  if(!tr.length)return"No significant signals.";
+  var L=["TX scratch-off analysis — jackpot focus ($10K+)\n"];
+  tr.sort(function(a,b){return b.sc-a.sc}).forEach(function(a){
+    L.push("#"+a.g.gn+" "+a.g.nm+" $"+a.g.pr+" | sc:"+a.sc+" | jkD:"+a.jackpotDensityShift.toFixed(2)+"x | hyp:"+a.hyperRatio.toFixed(2)+"x | top:"+a.tpr+"/"+a.tp.p+"($"+fN(a.tp.a)+") | "+pct(a.mat)+" sold | "+a.gm.sig+" | jkEV:$"+a.jackpotEV.toFixed(2)+(a.g.cs?" CLOSING":""));});
+  L.push("\n1. Top 2-3 buys? 2. Avoid? 3. Best per price?");return L.join("\n");
 }
-
-function copyAIPrompt(id){
-  var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}
-  if(!a)return;
-  var prompt=buildGamePrompt(a);
-  navigator.clipboard.writeText(prompt).then(function(){
-    S._promptMsg="✓ Prompt copied to clipboard!";render();
-    setTimeout(function(){S._promptMsg=null;render()},3000);
-  });
-}
-
-function showAIPrompt(id){
-  var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}
-  if(!a)return;
-  S._promptPreview=buildGamePrompt(a);render();
-}
-
-function downloadAIPrompt(id){
-  var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}
-  if(!a)return;
-  var prompt=buildGamePrompt(a);
-  var blob=new Blob([prompt],{type:"text/plain"});
-  var url=URL.createObjectURL(blob);
-  var dl=document.createElement("a");dl.href=url;dl.download="prompt_"+a.g.gn+"_"+a.g.nm.replace(/[^a-zA-Z0-9]/g,"_")+".txt";
-  dl.click();URL.revokeObjectURL(url);
-  S._promptMsg="✓ Downloaded "+dl.download;render();
-  setTimeout(function(){S._promptMsg=null;render()},3000);
-}
-
-function copyAllPrompt(){
-  var prompt=buildAllPrompt();
-  navigator.clipboard.writeText(prompt).then(function(){
-    S._promptMsg="✓ Prompt copied to clipboard!";render();
-    setTimeout(function(){S._promptMsg=null;render()},3000);
-  });
-}
-
-function showAllPrompt(){
-  S._allPromptPreview=buildAllPrompt();render();
-}
-
-function downloadAllPrompt(){
-  var prompt=buildAllPrompt();
-  var blob=new Blob([prompt],{type:"text/plain"});
-  var url=URL.createObjectURL(blob);
-  var dl=document.createElement("a");dl.href=url;dl.download="prompt_all_games_"+new Date().toISOString().slice(0,10)+".txt";
-  dl.click();URL.revokeObjectURL(url);
-  S._promptMsg="✓ Downloaded "+dl.download;render();
-  setTimeout(function(){S._promptMsg=null;render()},3000);
-}
-function mkv(){var pk=S.pack,rem=pk.pk-pk.log.length;if(rem<=0)return null;var wf=0;for(var i=0;i<pk.log.length;i++)if(pk.log[i].w)wf++;var wl=Math.max(0,pk.ew-wf),pW=wl/rem,pA=pk.af?0:1/rem;var dec="EARLY",rsn="Pack is early — "+(pA*100).toFixed(1)+"% per ticket.";if(pk.af){dec="STOP";rsn="Anchor found. Remaining are small winners/losers.";}else if(pA>=0.15){dec="BUY";rsn=(pA*100).toFixed(1)+"% chance anchor is next. Only "+rem+" left.";}else if(pA>=0.05){dec="CONSIDER";rsn=(pA*100).toFixed(1)+"% per ticket. "+rem+" remaining.";}return{rem:rem,wl:wl,pW:pW,pA:pA,dec:dec,rsn:rsn}}
+function copyAIPrompt(id){var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;navigator.clipboard.writeText(buildGamePrompt(a)).then(function(){S._promptMsg="✓ Copied!";render();setTimeout(function(){S._promptMsg=null;render()},2500)})}
+function showAIPrompt(id){var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;S._promptPreview=buildGamePrompt(a);render()}
+function copyAllPrompt(){navigator.clipboard.writeText(buildAllPrompt()).then(function(){S._promptMsg="✓ Copied!";render();setTimeout(function(){S._promptMsg=null;render()},2500)})}
+function showAllPrompt(){S._allPromptPreview=buildAllPrompt();render()}
 
 // === RENDER ===
 function render(){
   var pr={};GD.forEach(function(g){pr[g.pr]=1});var pArr=Object.keys(pr).map(Number).sort(function(a,b){return a-b});
   var f=S.data.slice();
   if(S.filterPr!=="all")f=f.filter(function(a){return a.g.pr===Number(S.filterPr)});
-  var sorts={
-    score:function(a,b){return b.sc-a.sc},
-    density:function(a,b){var sa=a.ps&&a.ps.valid&&a.ps.topShift?a.ps.topShift.shift:0;var sb=b.ps&&b.ps.valid&&b.ps.topShift?b.ps.topShift.shift:0;return sb-sa},
-    gap:function(a,b){return b.returnGap-a.returnGap},
-    topOdds:function(a,b){return a.tpo-b.tpo},
-    tickets:function(a,b){return a.mat-b.mat},
-    hyper:function(a,b){return b.hyperRatio-a.hyperRatio}
-  };
+  var sorts={score:function(a,b){return b.sc-a.sc},density:function(a,b){return b.jackpotDensityShift-a.jackpotDensityShift},gap:function(a,b){return b.returnGap-a.returnGap},topOdds:function(a,b){return a.tpo-b.tpo},tickets:function(a,b){return a.mat-b.mat},hyper:function(a,b){return b.hyperRatio-a.hyperRatio},jackpotEV:function(a,b){return b.jackpotEV-a.jackpotEV}};
   f.sort(sorts[S.sortBy]||sorts.score);
   var sel=null;if(S.selId){for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===S.selId){sel=S.data[i];break}}
 
-  var o='<div class="H"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><h1>TX SCRATCH-OFF ENGINE v6</h1><div class="sub">'+GD.length+' games'+(DD?' · Data: '+esc(DD):'')+'</div></div>';
-  o+='<div class="B'+(S._refreshing?"":" on")+'" onclick="refreshAllData()" style="font-size:10px;padding:6px 12px">'+(S._refreshing?'⏳ REFRESHING...':'↻ REFRESH')+'</div></div>';
+  var o='<div class="H"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><h1>TX ENGINE v7</h1><div class="sub">'+GD.length+' games · Jackpot focused'+(DD?' · '+esc(DD):'')+'</div></div>';
+  o+='<div class="B'+(S._refreshing?"":" on")+'" onclick="refreshAllData()" style="font-size:10px;padding:6px 12px">'+(S._refreshing?'⏳...':'↻ REFRESH')+'</div></div>';
   if(S._refreshMsg)o+='<div style="font-size:10px;color:var(--blu);margin-top:4px">'+esc(S._refreshMsg)+'</div>';
   if(S._promptMsg)o+='<div style="font-size:11px;color:#2ecc71;margin-top:4px;font-weight:600">'+esc(S._promptMsg)+'</div>';
   o+='<div class="tabs">';
-  [["picks","PICKS"],["detail","DETAIL"],["insights","INSIGHTS"],["winners","WINNERS"],["more","MORE"]].forEach(function(t){
-    o+='<div class="T'+(S.tab===t[0]?" on":"")+'" onclick="setTab(\''+t[0]+'\')">'+t[1]+'</div>';});
+  [["picks","PICKS"],["detail","DETAIL"],["insights","INSIGHTS"],["winners","WINNERS"],["more","MORE"]].forEach(function(t){o+='<div class="T'+(S.tab===t[0]?" on":"")+'" onclick="setTab(\''+t[0]+'\')">'+t[1]+'</div>';});
   o+='</div></div>';
 
-  // === EMPTY STATE ===
-  if(GD.length===0){
-    o+='<div class="C" style="text-align:center;padding:40px 20px"><div style="font-size:18px;color:var(--amb);margin-bottom:12px">No Game Data Loaded</div>';
-    o+='<div style="font-size:13px;color:var(--text);line-height:1.8">1. Run <code>python3 scrape.py</code> to fetch data from texaslottery.com<br>';
-    o+='2. Deploy <code>data/feed.json</code> alongside this page<br>';
-    o+='3. Click REFRESH above</div></div>';
-    document.getElementById("app").innerHTML=o;return;
-  }
+  if(GD.length===0){o+='<div class="C" style="text-align:center;padding:40px"><div style="font-size:18px;color:var(--amb)">No Data</div><div style="margin-top:8px">Run scraper → deploy feed.json → REFRESH</div></div>';document.getElementById("app").innerHTML=o;return;}
 
-  // === PICKS ===
+  // ==================== PICKS ====================
   if(S.tab==="picks"){
     o+='<div class="FR"><span class="L" style="margin:0">PRICE:</span>';
     ["all"].concat(pArr).forEach(function(p){var v=String(p);o+='<div class="B'+(S.filterPr===v?" on":"")+'" onclick="setFilter(\''+v+'\')" style="padding:5px 10px">'+(v==="all"?"ALL":"$"+v)+'</div>';});
     o+='</div><div class="FR"><span class="L" style="margin:0">SORT:</span>';
-    [["score","Score"],["density","Density"],["gap","Return Gap"],["topOdds","Top Odds"],["tickets","Freshest"],["hyper","Top Tier+"]].forEach(function(s){
-      o+='<div class="B'+(S.sortBy===s[0]?" bn":"")+'" onclick="setSort(\''+s[0]+'\')" style="padding:5px 10px">'+s[1]+'</div>';});
+    [["score","Score"],["density","JK Density"],["hyper","JK P(pack)"],["jackpotEV","JK EV"],["gap","Gap"],["topOdds","Top Odds"],["tickets","Fresh"]].forEach(function(s){o+='<div class="B'+(S.sortBy===s[0]?" bn":"")+'" onclick="setSort(\''+s[0]+'\')" style="padding:5px 10px">'+s[1]+'</div>';});
     o+='</div>';
-    
-    for(var idx=0;idx<f.length;idx++){var a=f[idx];
+
+    for(var idx=0;idx<f.length;idx++){var a=f[idx];var tr=getTrend(a.g.id);
       o+='<div class="C ck" onclick="openDetail(\''+a.g.id+'\')">';
       if(idx===0&&f.length>1)o+='<div class="badge" style="right:12px;background:var(--grn);color:var(--bg)">TOP PICK</div>';
-      if(a.g.cs)o+='<div class="badge" style="right:'+(idx===0&&f.length>1?"95px":"12px")+';background:var(--red);color:#fff">CLOSING</div>';
-      if(!a.complete)o+='<div class="badge" style="left:12px;background:var(--amb);color:var(--bg)">PARTIAL DATA</div>';
-      
+      if(a.g.cs)o+='<div class="badge" style="right:'+(idx===0&&f.length>1?'95px':'12px')+';background:var(--red);color:#fff">CLOSING</div>';
+      if(!a.btpInfo.hasJackpot)o+='<div class="badge" style="left:12px;background:var(--dim);color:var(--bg)">NO JK</div>';
+      else if(!a.complete)o+='<div class="badge" style="left:12px;background:var(--amb);color:var(--bg)">PARTIAL</div>';
+
       o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div style="flex:1;min-width:0">';
-      o+='<div style="font-size:15px;font-weight:700;color:var(--wht);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.g.nm)+' <span style="color:var(--dim);font-weight:400">#'+a.g.gn+'</span></div>';
-      o+='<div style="font-size:11px;color:var(--dim)">$'+a.g.pr+(a.g.pk?' · '+a.g.pk+'/pack':'')+(a.aa?' · BTP:$'+a.aa:'')+'</div></div>';
-      o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+(a.sc>=65?"var(--grn)":a.sc>=40?"var(--amb)":"var(--red)")+';font-size:28px">'+a.sc+'</div><div style="font-size:9px;color:var(--dim)">SCORE</div></div></div>';
-      
-      // Key metrics row
-      var ps=a.ps||{};
-      var dsVal=ps.valid&&ps.topShift?ps.topShift.shift.toFixed(2)+"x":"—";
-      var dsClr=ps.valid&&ps.topShift?(ps.topShift.shift>=1.5?"g":ps.topShift.shift>=1.2?"g":ps.topShift.shift>=0.9?"d":ps.topShift.shift>=0.7?"a":"r"):"d";
-      var ms=[
-        {l:"Density",v:dsVal,c:dsClr},
-        {l:"Return Gap",v:a.returnGap!==0?(a.returnGap>0?"+":"")+pct(a.returnGap):"—",c:a.returnGap>0.01?"g":a.returnGap<-0.01?"r":"d"},
-        {l:"Top Tier Odds",v:a.hyperRatio>0?a.hyperRatio.toFixed(2)+"x":"—",c:a.hyperRatio>1.1?"g":a.hyperRatio<0.9?"r":"d"},
-        {l:"Markov",v:a.gm.sig.replace("_"," "),c:a.gm.sig==="STRONG_BUY"?"g":a.gm.sig==="BUY"?"g":a.gm.sig==="AVOID"?"r":a.gm.sig==="DEAD"?"r":a.gm.sig==="CAUTION"?"a":a.gm.sig==="MIXED"?"a":"d"},
-        {l:"Win Odds",v:"1:"+a.winOdds.toFixed(2),c:a.winOdds<a.g.odds?"g":"d"},
-        {l:"Top Left",v:a.tpr+"/"+a.tp.p,c:a.tpr>0?"g":"r"},
-        {l:"Sold",v:pct(a.mat),c:a.mat<0.5?"g":a.mat<0.8?"a":"r"},
-        {l:"Designed Return",v:a.designedReturn>0?pct(a.designedReturn):"—",c:"d"},
-        {l:"Remaining Return",v:a.remainReturnPct>0?pct(a.remainReturnPct):"—",c:a.remainReturnPct>a.designedReturn?"g":a.remainReturnPct<a.designedReturn?"r":"d"},
-        {l:"Confidence",v:ps.valid?ps.confidence:"—",c:ps.valid?(ps.confidence==="HIGH"?"g":ps.confidence==="MEDIUM"?"a":"r"):"d"},
-        {l:"BTP Zone",v:ps.valid?ps.btpType:"—",c:ps.valid?(ps.btpType==="SINGLE"?"d":"b"):"d"},
-        {l:"Jackpot EV",v:ps.valid&&ps.jackpotEV>0?"$"+ps.jackpotEV.toFixed(2):"—",c:ps.valid&&ps.jackpotEVShift>1.05?"g":ps.valid&&ps.jackpotEVShift<0.95?"r":"d"},
-        {l:"Implied Yield",v:ps.valid&&ps.impliedYield>0?pct(ps.impliedYield):"—",c:"d"}
-      ];
-      o+='<div class="G" style="grid-template-columns:repeat(auto-fit,minmax(90px,1fr));margin-top:10px">';
-      ms.forEach(function(m){o+='<div><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:12px;font-weight:700" class="'+m.c+'">'+m.v+'</div></div>';});
+      o+='<div style="font-size:15px;font-weight:700;color:var(--wht);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.g.nm)+' <span class="d" style="font-weight:400">#'+a.g.gn+'</span></div>';
+      o+='<div style="font-size:11px;color:var(--dim)">$'+a.g.pr+(a.g.pk?' · '+a.g.pk+'/pk':'')+(a.aa?' · BTP:$'+fN(a.aa):'')+(a.g.guar?' · Fl:$'+fN(a.g.guar):'')+'</div></div>';
+      o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+(a.sc>=65?"var(--grn)":a.sc>=40?"var(--amb)":"var(--red)")+';font-size:28px">'+a.sc+'</div><div style="font-size:9px;color:var(--dim)">SCORE</div>';
+      if(tr.length>=3)o+='<div style="margin-top:2px">'+sparkline(tr,"sc",14)+'</div>';
+      o+='</div></div>';
+
+      // Why this score
+      if(a.whyScore.length>0){o+='<div style="margin-top:5px">';a.whyScore.forEach(function(w){var c=w.p>0?"var(--grn)":w.p<0?"var(--red)":"var(--dim)";o+='<span class="why-tag" style="background:'+c+'15;color:'+c+';border:1px solid '+c+'30">'+(w.p>0?"▲":"▼")+" "+w.f+'</span>';});o+='</div>';}
+
+      // Key metrics
+      o+='<div class="G" style="grid-template-columns:repeat(auto-fit,minmax(90px,1fr));margin-top:8px">';
+      [{l:"JK Density",v:a.jackpotDensityShift>0?a.jackpotDensityShift.toFixed(2)+"x":"—",c:a.jackpotDensityShift>=1.2?"g":a.jackpotDensityShift>=0.9?"d":"r"},
+       {l:"JK P(pack)",v:a.hyperRatio>0?a.hyperRatio.toFixed(2)+"x":"—",c:a.hyperRatio>1.1?"g":a.hyperRatio<0.9?"r":"d"},
+       {l:"JK EV",v:a.jackpotEV>0?"$"+a.jackpotEV.toFixed(2):"—",c:a.jackpotEVShift>1.05?"g":"d"},
+       {l:"Top Left",v:a.tpr+"/"+a.tp.p,c:a.tpr>0?"g":"r"},
+       {l:"Markov",v:a.gm.sig.replace(/_/g," "),c:"BUY STRONG_BUY".indexOf(a.gm.sig)>=0?"g":"AVOID DEAD".indexOf(a.gm.sig)>=0?"r":"d"},
+       {l:"Sold",v:pct(a.mat),c:a.mat<0.5?"g":a.mat<0.8?"a":"r"},
+       {l:"Floor",v:a.floorEV>0?"$"+fN(a.floorEV):"—",c:"d"},
+       {l:"Conf",v:a.confidence,c:a.confidence==="HIGH"?"g":a.confidence==="MEDIUM"?"a":"r"},
+       {l:"Gap",v:a.returnGap!==0?(a.returnGap>0?"+":"")+pct(a.returnGap):"—",c:a.returnGap>0.01?"g":a.returnGap<-0.01?"r":"d"}
+      ].forEach(function(m){o+='<div><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:12px;font-weight:700" class="'+m.c+'">'+m.v+'</div></div>';});
       o+='</div>';
-      
-      // Signal bar
-      if(a.flags.length>0){
-        o+='<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">';
-        a.flags.slice(0,4).forEach(function(fl){
-          o+='<span style="font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;background:var(--'+fl.c+'1);color:var(--'+fl.c+');border:1px solid var(--'+fl.c+')30">'+esc(fl.t)+'</span>';
-        });
-        o+='</div>';
-      }
+
+      // Jackpot tier quick view
+      if(a.jackpotShifts.length>0){o+='<div style="margin-top:6px;padding:5px 8px;background:var(--bg);border-radius:6px;display:flex;gap:12px;flex-wrap:wrap">';
+        a.jackpotShifts.forEach(function(j){var jc=j.signal==="STRONG"||j.signal==="GOOD"?"var(--grn)":j.signal==="NEUTRAL"?"var(--dim)":j.signal==="WEAK"?"var(--amb)":"var(--red)";
+          o+='<div style="font-size:10px"><span style="font-weight:700;color:'+jc+'">$'+fN(j.a)+'</span> '+(j.remaining<=0?'<span class="r">GONE</span>':'<span class="d">'+j.remaining+'/'+j.printed+' '+j.shift.toFixed(2)+'x</span>')+'</div>';});
+        o+='</div>';}
+
+      if(a.flags.length>0){o+='<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:5px">';a.flags.slice(0,4).forEach(function(fl){o+='<span style="font-size:9px;font-weight:700;padding:3px 8px;border-radius:4px;background:var(--'+fl.c+'1);color:var(--'+fl.c+');border:1px solid var(--'+fl.c+')30">'+esc(fl.t)+'</span>';});o+='</div>';}
       o+='</div>';
     }
   }
 
-  // === DETAIL ===
+  // ==================== DETAIL ====================
   if(S.tab==="detail"){
     o+='<select class="I" style="margin-bottom:14px" onchange="setSel(this.value)"><option value="">— Select game —</option>';
-    S.data.slice().sort(function(a,b){return b.sc-a.sc}).forEach(function(a){
-      o+='<option value="'+a.g.id+'"'+(S.selId===a.g.id?" selected":"")+'>['+a.sc+'] '+esc(a.g.nm)+' #'+a.g.gn+' ($'+a.g.pr+')</option>';});
+    S.data.slice().sort(function(a,b){return b.sc-a.sc}).forEach(function(a){o+='<option value="'+a.g.id+'"'+(S.selId===a.g.id?" selected":"")+'>['+a.sc+'] '+esc(a.g.nm)+' #'+a.g.gn+' ($'+a.g.pr+')</option>';});
     o+='</select>';
-    
     if(sel){
       // Header
-      o+='<div class="C"><div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px"><div>';
-      o+='<div style="font-size:18px;font-weight:800;color:var(--wht)">'+esc(sel.g.nm)+' <span style="color:var(--dim);font-size:14px;font-weight:400">#'+sel.g.gn+'</span></div>';
-      o+='<div style="font-size:11px;color:var(--dim);margin-top:4px">$'+sel.g.pr+(sel.g.pk?' · '+sel.g.pk+'/pack = $'+sel.pkc:'')+(sel.g.guar?' · Floor: $'+sel.g.guar:'')+(sel.g.odds?' · Odds: 1:'+sel.g.odds:'')+'</div></div>';
+      o+='<div class="C"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div>';
+      o+='<div style="font-size:18px;font-weight:800;color:var(--wht)">'+esc(sel.g.nm)+' <span class="d" style="font-size:14px">#'+sel.g.gn+'</span></div>';
+      o+='<div style="font-size:11px;color:var(--dim);margin-top:4px">$'+sel.g.pr+' · '+sel.g.pk+'/pack=$'+fN(sel.packPrice)+' · Floor:$'+fN(sel.g.guar||0)+' · Odds:1:'+sel.g.odds+'</div></div>';
       o+='<div style="text-align:right"><div class="V" style="color:'+(sel.sc>=65?"var(--grn)":sel.sc>=40?"var(--amb)":"var(--red)")+'">'+sel.sc+'</div><div class="L">SCORE</div></div></div>';
-      
-      // Signal summary
+      // Why
+      if(sel.whyScore.length){o+='<div style="margin-top:6px">';sel.whyScore.forEach(function(w){var c=w.p>0?"var(--grn)":w.p<0?"var(--red)":"var(--dim)";o+='<span class="why-tag" style="background:'+c+'15;color:'+c+';border:1px solid '+c+'30">'+(w.p>0?"▲+":"▼")+w.p+' '+w.f+'</span>';});o+='</div>';}
       o+='<div style="margin-top:8px;padding:8px 12px;background:var(--bg);border-radius:8px;font-size:12px">';
-      if(sel.aa)o+='BTP: <strong class="g">$'+sel.aa+'</strong>'+(sel.btpValid?' <span class="d">(validated)</span>':' <span class="a">(unvalidated)</span>')+' · ';
-      o+='Markov: <strong style="color:'+(sel.gm.sig==="STRONG_BUY"||sel.gm.sig==="BUY"?"var(--grn)":sel.gm.sig==="AVOID"||sel.gm.sig==="DEAD"?"var(--red)":sel.gm.sig==="CAUTION"||sel.gm.sig==="MIXED"?"var(--amb)":"var(--dim)")+'">'+sel.gm.sig.replace("_"," ")+'</strong>';
-      if(sel.designedReturn>0)o+=' · Design: <strong class="d">'+pct(sel.designedReturn)+'</strong>';
+      o+='BTP:<strong class="g">$'+fN(sel.aa)+'</strong>'+(sel.btpValid?' <span class="d">✓</span>':'')+' · Signal:<strong style="color:'+("BUY STRONG_BUY".indexOf(sel.gm.sig)>=0?"var(--grn)":"AVOID DEAD".indexOf(sel.gm.sig)>=0?"var(--red)":"var(--dim)")+'">'+sel.gm.sig.replace(/_/g," ")+'</strong> · Conf:<strong style="color:'+(sel.confidence==="HIGH"?"var(--grn)":sel.confidence==="MEDIUM"?"var(--amb)":"var(--red)")+'">'+sel.confidence+'</strong></div>';
+      if(!sel.complete)o+='<div style="margin-top:6px;padding:6px;background:var(--amb)18;border:1px solid var(--amb)30;border-radius:6px;font-size:11px;color:var(--amb)">⚠ Missing data. Run scraper with detail pages.</div>';
       o+='</div>';
-      if(!sel.complete)o+='<div style="margin-top:6px;padding:6px 10px;background:var(--amb)18;border:1px solid var(--amb)30;border-radius:6px;font-size:11px;color:var(--amb)">⚠ Missing detail page data (tot/pk/guar/odds). Some metrics estimated or unavailable. Run scraper with detail page fetching.</div>';
+
+      // === JACKPOT TRACKER ===
+      if(sel.jackpotShifts.length>0){
+        o+='<div class="C" style="border-color:#d4a01744"><div class="L" style="margin-bottom:10px;color:var(--gld)">🎯 JACKPOT TRACKER</div>';
+        sel.jackpotShifts.forEach(function(j){
+          var sc2=j.signal==="STRONG"||j.signal==="GOOD"?"#2ecc71":j.signal==="NEUTRAL"?"#5a6a7a":j.signal==="WEAK"?"#f39c12":"#e74c3c";
+          o+='<div style="padding:10px;background:var(--bg);border-radius:8px;margin-bottom:8px;border-left:3px solid '+sc2+';display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">';
+          o+='<div style="font-size:20px;font-weight:800;color:'+sc2+'">$'+fN(j.a)+'</div>';
+          if(j.remaining<=0)o+='<div style="font-size:16px;font-weight:800;color:var(--red)">ALL CLAIMED</div>';
+          else{o+='<div style="text-align:center"><div style="font-size:16px;font-weight:800">'+j.remaining+'<span class="d" style="font-size:11px">/'+j.printed+'</span></div><div style="font-size:9px" class="d">LEFT</div></div>';
+            o+='<div style="text-align:center"><div style="font-size:16px;font-weight:800;color:'+sc2+'">'+j.shift.toFixed(2)+'x</div><div style="font-size:9px" class="d">DENSITY</div></div>';
+            o+='<div style="text-align:center"><div style="font-size:14px;font-weight:700">1:'+fN(j.currentOdds)+'</div><div style="font-size:8px;color:'+(j.launchOdds>j.currentOdds?"var(--grn)":"var(--red)")+'">'+(j.launchOdds>j.currentOdds?(j.launchOdds/j.currentOdds).toFixed(1)+"x better":"was 1:"+fN(j.launchOdds))+'</div></div>';}
+          o+='<div style="font-size:11px;font-weight:700;color:'+sc2+';padding:4px 10px;background:'+sc2+'18;border-radius:6px">'+j.signal+'</div>';
+          if(j.printed<=10)o+='<div style="width:100%;font-size:10px;color:var(--amb)">⚡ ≤10 printed — high sensitivity</div>';
+          o+='</div>';});
+        // Combined stats
+        o+='<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">';
+        o+='<div class="cl"><div class="L" style="font-size:8px">P(JK IN PACK)</div><div style="font-size:18px;font-weight:800;color:'+(sel.hyperRatio>1.05?'var(--grn)':'var(--wht)')+'">'+(sel.hyperNow>=0.01?pct(sel.hyperNow):'1:'+fN(Math.round(1/sel.hyperNow)))+'</div><div style="font-size:9px" class="d">'+sel.hyperRatio.toFixed(2)+'x vs launch</div></div>';
+        o+='<div class="cl"><div class="L" style="font-size:8px">JK EV/PACK</div><div style="font-size:18px;font-weight:800;color:var(--pur)">$'+sel.jackpotEV.toFixed(2)+'</div><div style="font-size:9px" class="d">was $'+sel.jackpotEVLaunch.toFixed(2)+' ('+sel.jackpotEVShift.toFixed(2)+'x)</div></div>';
+        o+='<div class="cl"><div class="L" style="font-size:8px">JK DENSITY</div><div style="font-size:18px;font-weight:800;color:'+(sel.jackpotDensityShift>=1.2?'var(--grn)':'var(--wht)')+'">'+sel.jackpotDensityShift.toFixed(2)+'x</div></div>';
+        o+='</div></div>';}
+
+      // === EV MODEL ===
+      o+='<div class="C" style="border-color:#3498db44"><div class="L" style="margin-bottom:10px;color:var(--blu)">📊 FLOOR-BASED EV</div>';
+      o+='<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">';
+      [{l:"Floor(FACT)",v:"$"+fN(sel.floorEV),c:"var(--grn)"},{l:"Mid Upside",v:"$"+sel.midRangeEV.toFixed(0),c:"var(--blu)"},{l:"Jackpot EV",v:"$"+sel.jackpotEV.toFixed(2),c:"var(--pur)"},{l:"Total EV",v:"$"+Math.round(sel.totalEV),c:"var(--wht)"},{l:"Pack Cost",v:"$"+fN(sel.packPrice),c:"var(--red)"},{l:"Edge",v:(sel.edge>0?"+":"")+pct(sel.edge),c:sel.edge>-0.1?"var(--amb)":"var(--red)"}].forEach(function(e){o+='<div class="cl"><div class="L" style="font-size:8px">'+e.l+'</div><div style="font-size:16px;font-weight:800;color:'+e.c+'">'+e.v+'</div></div>';});
       o+='</div>';
-      
-      // Key metrics
-      var dm=[
-        {l:"DESIGNED RETURN",v:sel.designedReturn>0?pct(sel.designedReturn):"—",c:"var(--dim)",s:"Built into prize structure"},
-        {l:"REMAINING RETURN",v:sel.remainReturnPct>0?pct(sel.remainReturnPct):"—",c:sel.remainReturnPct>sel.designedReturn?"var(--grn)":sel.remainReturnPct<sel.designedReturn?"var(--red)":"var(--dim)",s:"Current per-ticket return"},
-        {l:"RETURN GAP",v:sel.returnGap!==0?(sel.returnGap>0?"+":"")+pct(sel.returnGap):"—",c:sel.returnGap>0?"var(--grn)":sel.returnGap<0?"var(--red)":"var(--dim)",s:sel.returnGap>0?"Remaining richer than sold":"Remaining thinner than sold"},
-        {l:"TOP TIER P(PACK)",v:sel.hyperNow>0?sel.hyperNow>=0.01?pct(sel.hyperNow):"1:"+fN(Math.round(1/sel.hyperNow)):"—",c:sel.hyperRatio>1?"var(--grn)":"var(--dim)",s:sel.hyperRatio>0?sel.hyperRatio.toFixed(2)+"x vs launch":""},
-        {l:"WIN ODDS (now)",v:"1:"+sel.winOdds.toFixed(2),c:sel.winOdds<sel.g.odds?"var(--grn)":"var(--dim)"},
-        {l:"TOP PRIZE $"+fN(sel.tp.a),v:sel.tpr+" / "+sel.tp.p+" left",c:sel.tpr>0?"var(--grn)":"var(--red)",s:sel.tpr>0&&sel.epr>0?"1:"+fN(Math.round(sel.epr/sel.tpr))+" packs"+(sel.pc>0&&sel.tp.p>0?" (was 1:"+fN(Math.round(sel.pc/sel.tp.p))+")":""):""},
-        {l:"TICKETS LEFT",v:fN(sel.etr)+(sel.g.tot>0?" / "+fN(sel.g.tot):""),s:(sel.mat>0?pct(1-sel.mat)+" remaining":"")+(sel.pc>0?" · "+fN(sel.epr)+"/"+fN(sel.pc)+" packs":""),c:"var(--wht)"},
-        {l:"PRIZE $ LEFT",v:fmt(sel.tpvr),s:"of "+fmt(sel.tpvp),c:"var(--blu)"}
-      ];
-      o+='<div class="C"><div class="L" style="margin-bottom:8px">KEY METRICS</div><div class="G GA">';
-      dm.forEach(function(m){o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:18px;font-weight:800;color:'+m.c+'">'+m.v+'</div>'+(m.s?'<div style="font-size:9px;color:var(--dim);margin-top:2px">'+m.s+'</div>':'')+'</div>';});
+      var evMx=sel.packPrice||1;
+      o+='<div style="height:28px;background:var(--bg);border-radius:6px;overflow:hidden;position:relative;display:flex">';
+      [{v:sel.floorEV,c:"var(--grn)"},{v:sel.midRangeEV,c:"var(--blu)"},{v:sel.jackpotEV,c:"var(--pur)"}].forEach(function(e){o+='<div style="width:'+(e.v/evMx*100)+'%;height:100%;background:'+e.c+';opacity:.5"></div>';});
+      o+='<div style="position:absolute;right:0;top:0;width:2px;height:100%;background:var(--red)"></div>';
+      o+='<span style="position:absolute;right:8px;top:6px;font-size:11px;color:#fff;font-weight:600">$'+fN(sel.packPrice)+'</span></div>';
+      o+='<div style="font-size:10px;margin-top:4px" class="d"><span class="g">■</span>Floor <span class="b">■</span>Mid <span class="p">■</span>JK <span class="r">|</span>Cost</div></div>';
+
+      // === SIMULATION ===
+      var sim=simulatePacks(sel);
+      if(sim.valid){
+        o+='<div class="C" style="border-color:#9b59b644"><div class="L" style="margin-bottom:10px;color:var(--pur)">🎲 SIMULATION ('+fN(sim.N)+' packs)</div>';
+        o+='<div class="G" style="grid-template-columns:repeat(auto-fit,minmax(85px,1fr));margin-bottom:10px">';
+        [{l:"P(Floor)",v:pct(sim.pFloor),c:sim.pFloor>0.7?"var(--red)":"var(--amb)"},{l:"P(Profit)",v:pct(sim.pProfit),c:sim.pProfit>0.05?"var(--grn)":"var(--red)"},{l:"P($10K+)",v:sim.p5Digit>0.001?pct(sim.p5Digit):"<0.1%",c:"var(--dim)"},{l:"P(JK$50K+)",v:sim.pJackpot>0.0001?pct(sim.pJackpot):"<0.01%",c:"var(--dim)"},{l:"Mean",v:"$"+Math.round(sim.mean),c:"var(--wht)"},{l:"Median",v:"$"+Math.round(sim.median),c:"var(--wht)"},{l:"Exp P&L",v:(sim.expPL>=0?"+":"")+"$"+Math.round(sim.expPL),c:sim.expPL>=0?"var(--grn)":"var(--red)"}].forEach(function(m){o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:13px;font-weight:800;color:'+m.c+'">'+m.v+'</div></div>';});
+        o+='</div>';
+        var mxBk=Math.max.apply(null,sim.buckets.map(function(b){return b.n}));
+        sim.buckets.forEach(function(b){var w=mxBk>0?(b.n/mxBk)*100:0;var p2=(b.n/sim.N*100).toFixed(1);var c=b.l.indexOf("Break")>=0||b.l.indexOf("2x")>=0||b.l.indexOf("5x")>=0?"var(--grn)":b.l.indexOf("Floor+")>=0?"var(--amb)":"var(--dim)";
+          o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px"><div style="width:70px;text-align:right;font-size:10px;font-weight:600;color:'+c+'">'+b.l+'</div><div style="flex:1;height:18px;background:var(--bg);border-radius:3px;overflow:hidden;position:relative"><div style="width:'+w+'%;height:100%;background:'+c+';opacity:.5;border-radius:3px"></div><span style="position:absolute;right:6px;top:1px;font-size:10px;color:#fff;font-weight:600">'+p2+'%</span></div></div>';});
+        o+='<div style="font-size:10px;margin-top:4px" class="d">Range: $'+fN(sim.worst)+'–$'+fN(sim.best)+' · Cost: $'+fN(sim.cost)+'</div></div>';}
+
+      // === VALIDATION ===
+      o+='<div class="C"><div class="L" style="margin-bottom:8px">VALIDATION</div>';
+      o+='<div class="G G3">';
+      [{l:"BTP Clock(A)",v:fN(sel.methodA)},{l:"Prize Cnt(B)",v:fN(sel.methodB)},{l:"$Yield(C)",v:fN(sel.methodC)}].forEach(function(m){o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:13px;font-weight:700">'+m.v+'</div></div>';});
+      o+='</div>';
+      o+='<div style="margin-top:6px;font-size:11px">Conf:<strong style="color:'+(sel.confidence==="HIGH"?"var(--grn)":sel.confidence==="MEDIUM"?"var(--amb)":"var(--red)")+'"> '+sel.confidence+'</strong> · Yield:<strong style="color:'+(sel.yieldValid?"var(--grn)":"var(--red)")+'"> '+pct(sel.impliedYield)+'</strong>'+(sel.yieldValid?' ✓':' ⚠');
+      if(sel.btpInfo.valid){o+=' · BTP Zone: ';sel.btpInfo.floorZone.forEach(function(fz,idx){o+='<strong style="color:'+(fz.a===sel.aa?'var(--grn)':'var(--dim)')+'">$'+fN(fz.a)+'</strong>('+fz.ratio.toFixed(2)+')';if(idx<sel.btpInfo.floorZone.length-1)o+='·';});if(sel.btpInfo.floorValid)o+=' <span class="g">Floor✓</span>';}
       o+='</div></div>';
-      
-      // === PACK STRUCTURE ANALYSIS ===
-      if(sel.ps&&sel.ps.valid){
-        var ps=sel.ps;
-        o+='<div class="C" style="border-color:#d4a01744"><div class="L" style="margin-bottom:8px;color:var(--gld)">📊 PACK STRUCTURE ANALYSIS</div>';
-        
-        // BTP Zone
-        o+='<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">';
-        o+='<div style="flex:1;min-width:200px"><div class="L" style="font-size:8px">BTP ZONE ('+ps.btpType+')</div>';
-        ps.btpZone.forEach(function(t){
-          var roleClr=t.role==="PRIMARY_BTP"?"var(--grn)":t.role==="SECONDARY_BTP"?"var(--blu)":"var(--amb)";
-          var roleLabel=t.role==="PRIMARY_BTP"?"PRIMARY":t.role==="SECONDARY_BTP"?"SECONDARY":"MID-TIER";
-          o+='<div style="display:flex;align-items:center;gap:8px;margin-top:4px">';
-          o+='<span style="font-weight:700;color:'+roleClr+'">$'+fN(t.a)+'</span>';
-          o+='<span style="font-size:9px;padding:2px 6px;border-radius:3px;background:'+roleClr+'18;color:'+roleClr+';font-weight:600">'+roleLabel+'</span>';
-          o+='<span style="font-size:10px;color:var(--dim)">'+t.ratio.toFixed(2)+'/pack</span>';
-          o+='</div>';
-        });
-        o+='<div style="font-size:10px;color:var(--dim);margin-top:6px">Zone ceiling: $'+fN(ps.zoneCeiling)+' · Above this = outlier prizes</div>';
-        o+='</div>';
-        
-        // Validation
-        o+='<div style="flex:1;min-width:200px"><div class="L" style="font-size:8px">PACKS SOLD VALIDATION</div>';
-        o+='<div class="G" style="grid-template-columns:1fr 1fr 1fr;margin-top:4px">';
-        [{l:"BTP Clock",v:fN(ps.methodA)},{l:"Prize Count",v:fN(ps.methodB)},{l:"$ Yield",v:fN(ps.methodC)}].forEach(function(m){
-          o+='<div><div style="font-size:8px;color:var(--dim)">'+m.l+'</div><div style="font-size:13px;font-weight:700;color:var(--wht)">'+m.v+'</div></div>';
-        });
-        o+='</div>';
-        var confClr=ps.confidence==="HIGH"?"var(--grn)":ps.confidence==="MEDIUM"?"var(--amb)":"var(--red)";
-        o+='<div style="margin-top:6px;font-size:11px">Confidence: <strong style="color:'+confClr+'">'+ps.confidence+'</strong>';
-        if(ps.yieldValid)o+=' · Implied yield: <strong style="color:var(--grn)">'+pct(ps.impliedYield)+'</strong>';
-        else o+=' · Implied yield: <strong style="color:var(--red)">'+pct(ps.impliedYield)+' (outside range)</strong>';
-        o+='</div></div></div>';
-        
-        // Density Shifts
-        if(ps.densityShifts.length>0){
-          o+='<div style="margin-top:10px"><div class="L" style="font-size:8px;margin-bottom:6px">ABOVE-BTP DENSITY SHIFT — remaining vs launch</div>';
-          ps.densityShifts.forEach(function(d){
-            var sigClr=d.signal==="STRONG"?"#2ecc71":d.signal==="GOOD"?"#2ecc71":d.signal==="NEUTRAL"?"#5a6a7a":d.signal==="WEAK"?"#f39c12":"#e74c3c";
-            var barW=Math.min(100,Math.max(5,d.shift*50)); // 1.0x = 50%, 2.0x = 100%
-            o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">';
-            o+='<div style="width:70px;text-align:right;font-weight:700;font-size:12px;color:var(--wht)">$'+fN(d.a)+'</div>';
-            o+='<div style="flex:1;height:22px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
-            o+='<div style="width:'+barW+'%;height:100%;background:'+sigClr+';opacity:.6;border-radius:4px"></div>';
-            // 1.0x reference line
-            o+='<div style="position:absolute;left:50%;top:0;width:2px;height:100%;background:#f39c12;opacity:.5"></div>';
-            o+='<span style="position:absolute;right:6px;top:3px;font-size:10px;color:#fff;font-weight:600">'+d.shift.toFixed(2)+'x</span></div>';
-            o+='<div style="width:60px;font-size:10px;font-weight:700;color:'+sigClr+'">'+d.signal+'</div>';
-            o+='<div style="width:80px;font-size:9px;color:var(--dim)">'+fN(d.remaining)+' in '+fN(ps.packsRemaining)+'</div></div>';
-          });
-          o+='<div style="font-size:10px;color:var(--dim);margin-top:4px">Yellow line = launch baseline (1.0x). Right of line = concentrated in remaining packs.</div>';
-        }
-        
-        // Pack composition
-        o+='<div style="margin-top:10px;padding:8px 10px;background:var(--bg);border-radius:6px">';
-        o+='<div class="L" style="font-size:8px;margin-bottom:4px">REMAINING PACK COMPOSITION</div>';
-        var abvPct2=ps.packsRemaining>0?(ps.abvRemaining/ps.packsRemaining*100).toFixed(1):0;
-        o+='<div style="font-size:12px;color:var(--text)">';
-        o+='<strong style="color:var(--grn)">'+fN(ps.abvRemaining)+'</strong> packs have above-BTP prizes ('+abvPct2+'%) · ';
-        o+='<strong style="color:var(--dim)">'+fN(ps.btpOnlyRemaining)+'</strong> are BTP-only packs';
-        o+='</div>';
-        // Overall density
-        o+='<div style="font-size:11px;margin-top:4px">Overall above-BTP density: <strong style="color:'+(ps.overallShift>=1.2?"var(--grn)":ps.overallShift>=0.9?"var(--wht)":"var(--red)")+'">'+ps.overallShift.toFixed(2)+'x</strong> vs launch</div>';
-        o+='</div>';
-        
-        // Signal
-        var psSigClr=ps.signal==="STRONG_BUY"?"var(--grn)":ps.signal==="BUY"?"var(--grn)":ps.signal==="AVOID"?"var(--red)":ps.signal==="WEAK"?"var(--amb)":ps.signal==="EARLY"?"var(--blu)":"var(--dim)";
-        o+='<div style="margin-top:8px;padding:8px 12px;background:var(--bg);border-radius:6px;border-left:3px solid '+psSigClr+'">';
-        o+='<span style="font-size:13px;font-weight:700;color:'+psSigClr+'">'+ps.signal.replace("_"," ")+'</span> ';
-        o+='<span style="font-size:11px;color:var(--text)">'+esc(ps.signalReason)+'</span></div>';
-        
-        o+='</div>';
-      }
-      
-      // === EV PROJECTIONS ===
-      if(sel.ps&&sel.ps.valid&&sel.ps.evProjections&&sel.ps.evProjections.length>0){
-        var evp=sel.ps.evProjections;
-        var pprice=sel.g.pk*sel.g.pr;
-        o+='<div class="C" style="border-color:#3498db44"><div class="L" style="margin-bottom:8px;color:var(--blu)">📊 EV PROJECTIONS — PACK VALUE BY YIELD ASSUMPTION</div>';
-        o+='<div style="font-size:10px;color:var(--dim);margin-bottom:10px">Floor: '+pct(sel.ps.floorPct)+' ($'+Math.round(pprice*sel.ps.floorPct)+') · Implied yield: <strong style="color:var(--wht)">'+pct(sel.ps.impliedYield)+'</strong> (where Method C ≈ BTP clock) · Pack: $'+fN(pprice)+'</div>';
-        
-        // Header row
-        o+='<div style="display:grid;grid-template-columns:55px 1fr 70px 70px 65px 60px;gap:4px;padding:4px 0;border-bottom:1px solid var(--border);margin-bottom:2px">';
-        o+='<div style="font-size:8px;color:var(--dim);font-weight:600">YIELD</div>';
-        o+='<div style="font-size:8px;color:var(--dim);font-weight:600">EV BAR</div>';
-        o+='<div style="font-size:8px;color:var(--dim);font-weight:600;text-align:right">BASE EV</div>';
-        o+='<div style="font-size:8px;color:var(--dim);font-weight:600;text-align:right">TOTAL EV</div>';
-        o+='<div style="font-size:8px;color:var(--dim);font-weight:600;text-align:right">EDGE</div>';
-        o+='<div style="font-size:8px;color:var(--dim);font-weight:600;text-align:right">MC PACKS</div>';
-        o+='</div>';
-        
-        evp.forEach(function(ev){
-          var barPct=pprice>0?Math.min(100,(ev.totalEV/pprice)*100):0;
-          var evClr=ev.edge>=-0.15?"var(--grn)":ev.edge>=-0.30?"var(--amb)":"var(--red)";
-          var isImplied=Math.abs(ev.yield-sel.ps.impliedYield)<0.02;
-          var rowBg=isImplied?"#3498db12":ev.isFloor?"#2ecc7108":"transparent";
-          var labelClr=ev.isFloor?"var(--grn)":isImplied?"var(--blu)":"var(--dim)";
-          
-          o+='<div style="display:grid;grid-template-columns:55px 1fr 70px 70px 65px 60px;gap:4px;padding:3px 0;background:'+rowBg+';border-radius:4px;align-items:center">';
-          // Yield label
-          o+='<div style="font-size:11px;font-weight:'+(ev.isFloor||isImplied?'700':'400')+';color:'+labelClr+'">'+ev.label+(isImplied?' ◄':'')+'</div>';
-          // EV bar
-          o+='<div style="height:16px;background:var(--bg);border-radius:3px;overflow:hidden;position:relative">';
-          // Base EV portion
-          var basePct=pprice>0?(ev.baseEV/pprice)*100:0;
-          var jackPct=pprice>0?(ev.jackpotEV/pprice)*100:0;
-          o+='<div style="position:absolute;left:0;top:0;width:'+basePct+'%;height:100%;background:var(--blu);opacity:.4"></div>';
-          // Jackpot EV stacked on top
-          o+='<div style="position:absolute;left:'+basePct+'%;top:0;width:'+jackPct+'%;height:100%;background:var(--pur);opacity:.6"></div>';
-          // Pack price reference line
-          o+='<div style="position:absolute;right:0;top:0;width:1px;height:100%;background:var(--red);opacity:.5"></div>';
-          o+='</div>';
-          // Base EV
-          o+='<div style="font-size:10px;text-align:right;color:var(--dim)">$'+Math.round(ev.baseEV)+'</div>';
-          // Total EV
-          o+='<div style="font-size:11px;text-align:right;font-weight:700;color:var(--wht)">$'+Math.round(ev.totalEV)+'</div>';
-          // Edge
-          o+='<div style="font-size:10px;text-align:right;font-weight:700;color:'+evClr+'">'+(ev.edge>0?'+':'')+pct(ev.edge)+'</div>';
-          // Method C packs
-          o+='<div style="font-size:9px;text-align:right;color:var(--dim)">'+fN(ev.methodC)+'</div>';
-          o+='</div>';
-        });
-        
-        // Jackpot EV callout
-        o+='<div style="margin-top:10px;padding:8px 10px;background:var(--bg);border-radius:6px;display:flex;gap:16px;flex-wrap:wrap">';
-        o+='<div><div class="L" style="font-size:8px">JACKPOT EV / PACK</div><div style="font-size:14px;font-weight:800;color:var(--pur)">$'+sel.ps.jackpotEV.toFixed(2)+'</div></div>';
-        o+='<div><div class="L" style="font-size:8px">JACKPOT EV SHIFT</div><div style="font-size:14px;font-weight:800;color:'+(sel.ps.jackpotEVShift>=1.05?'var(--grn)':sel.ps.jackpotEVShift<=0.95?'var(--red)':'var(--dim)')+'">'+sel.ps.jackpotEVShift.toFixed(2)+'x</div></div>';
-        o+='<div><div class="L" style="font-size:8px">JACKPOT EV AT LAUNCH</div><div style="font-size:14px;font-weight:800;color:var(--dim)">$'+sel.ps.jackpotEVLaunch.toFixed(2)+'</div></div>';
-        o+='<div><div class="L" style="font-size:8px">SIGNAL STABILITY</div><div style="font-size:14px;font-weight:800;color:'+(sel.ps.signalStability==='STABLE'?'var(--grn)':sel.ps.signalStability==='MARGINAL'?'var(--amb)':'var(--red)')+'">'+sel.ps.signalStability+'</div></div>';
-        o+='</div>';
-        
-        o+='<div style="margin-top:6px;font-size:10px;color:var(--dim)"><span style="color:var(--blu)">■</span> Base EV (BTP zone) · <span style="color:var(--pur)">■</span> Jackpot EV (above-BTP) · <span style="color:var(--red)">|</span> Pack cost · ◄ = implied yield</div>';
-        o+='</div>';
-      }
-      
-      // === RETURN GAP GRAPH + TOP TIER DONUT ===
-      o+='<div class="C"><div style="display:flex;gap:16px;flex-wrap:wrap">';
-      
-      // LEFT: Return gap visual
-      o+='<div style="flex:1;min-width:200px">';
-      o+='<div class="L" style="margin-bottom:10px">RETURN GAP ANALYSIS</div>';
-      var drPct=sel.designedReturn>0?(sel.designedReturn*100):0;
-      var soldPct=sel.g.pr>0&&sel.ets>0?(sel.soldReturn/sel.g.pr*100):0;
-      var remPct=sel.remainReturnPct>0?(sel.remainReturnPct*100):0;
-      var maxBar=Math.max(drPct,soldPct,remPct,1);
-      // Designed return bar
-      o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
-      o+='<div style="width:80px;text-align:right;font-size:10px;color:var(--dim);font-weight:600">DESIGNED</div>';
-      o+='<div style="flex:1;height:24px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
-      o+='<div style="width:'+(drPct/maxBar*100)+'%;height:100%;background:#5a6a7a;border-radius:4px"></div>';
-      o+='<span style="position:absolute;right:8px;top:4px;font-size:11px;color:#ccc;font-weight:600">'+drPct.toFixed(1)+'%</span></div></div>';
-      // Sold return bar
-      o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
-      o+='<div style="width:80px;text-align:right;font-size:10px;color:var(--amb);font-weight:600">SOLD</div>';
-      o+='<div style="flex:1;height:24px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
-      o+='<div style="width:'+(soldPct/maxBar*100)+'%;height:100%;background:linear-gradient(90deg,#f39c12,#e67e22);border-radius:4px"></div>';
-      o+='<span style="position:absolute;right:8px;top:4px;font-size:11px;color:#fff;font-weight:600">'+soldPct.toFixed(1)+'%</span></div></div>';
-      // Remaining return bar
-      var remClr=remPct>drPct?"#2ecc71":"#e74c3c";
-      o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
-      o+='<div style="width:80px;text-align:right;font-size:10px;color:'+remClr+';font-weight:600">REMAINING</div>';
-      o+='<div style="flex:1;height:24px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
-      o+='<div style="width:'+(remPct/maxBar*100)+'%;height:100%;background:linear-gradient(90deg,'+remClr+','+remClr+'cc);border-radius:4px"></div>';
-      o+='<span style="position:absolute;right:8px;top:4px;font-size:11px;color:#fff;font-weight:600">'+remPct.toFixed(1)+'%</span></div></div>';
-      // Gap callout
-      if(sel.returnGap!==0){
-        var gapClr=sel.returnGap>0?"#2ecc71":"#e74c3c";
-        o+='<div style="text-align:center;margin-top:4px;font-size:18px;font-weight:800;color:'+gapClr+'">'+(sel.returnGap>0?"+":"")+pct(sel.returnGap)+'</div>';
-        o+='<div style="text-align:center;font-size:10px;color:var(--dim)">'+(sel.returnGap>0?"Remaining packs return more than sold":"Remaining packs return less than sold")+'</div>';
-      }
+
+      // === RETURN GAP ===
+      o+='<div class="C"><div class="L" style="margin-bottom:8px">RETURN GAP (cross-check)</div>';
+      var dr=sel.designedReturn*100,rr=sel.remainReturnPct*100,mxR=Math.max(dr,rr,1);
+      [{l:"DESIGNED",v:dr,c:"#5a6a7a"},{l:"REMAINING",v:rr,c:rr>dr?"#2ecc71":"#e74c3c"}].forEach(function(b){o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:80px;text-align:right;font-size:10px;font-weight:600;color:'+b.c+'">'+b.l+'</div><div style="flex:1;height:22px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative"><div style="width:'+(b.v/mxR*100)+'%;height:100%;background:'+b.c+';border-radius:4px"></div><span style="position:absolute;right:8px;top:3px;font-size:11px;color:#fff;font-weight:600">'+b.v.toFixed(1)+'%</span></div></div>';});
+      if(sel.returnGap!==0)o+='<div style="text-align:center;font-size:16px;font-weight:800;color:'+(sel.returnGap>0?"var(--grn)":"var(--red)")+'">'+(sel.returnGap>0?"+":"")+pct(sel.returnGap)+'</div>';
       o+='</div>';
-      
-      // RIGHT: JACKPOT TRACKER — top 1-3 prize tiers individually
-      // Determine how many top tiers to show based on game price + prize rarity
-      // $1-$5: top 1-2, $10-$20: top 2-3, $30+: top 3
-      var jackpotTiers=[];
-      var aboveBtp=sel.prizes.filter(function(p){return p.isO});
-      // Sort by amount descending (should already be, but ensure)
-      aboveBtp.sort(function(a,b){return b.a-a.a});
-      var maxShow=sel.g.pr>=30?3:sel.g.pr>=10?3:2;
-      // Only include tiers that are genuinely rare (few printed relative to packs)
-      for(var jj=0;jj<Math.min(maxShow,aboveBtp.length);jj++){
-        var jp=aboveBtp[jj];
-        // Include if printed count is relatively small (rare prize) — ratio < 1 per 5 packs
-        if(sel.pc>0&&jp.p/sel.pc<0.2){
-          jackpotTiers.push(jp);
-        }else if(jj===0){
-          // Always include the #1 prize
-          jackpotTiers.push(jp);
-        }
-      }
-      
-      o+='<div style="flex:0 0 220px">';
-      o+='<div class="L" style="margin-bottom:8px">JACKPOT TRACKER</div>';
-      
-      // Game size context: total tickets (packs)
-      if(sel.g.tot>0&&sel.pc>0){
-        o+='<div style="font-size:10px;color:var(--dim);margin-bottom:8px">'+fN(sel.g.tot)+' tickets ('+fN(sel.pc)+' packs)</div>';
-      }
-      
-      if(jackpotTiers.length===0){
-        o+='<div style="font-size:11px;color:var(--dim)">No above-BTP prize data</div>';
-      }else{
-        // Combined donut for all jackpot tiers
-        var jtRem=0,jtPrinted=0;
-        jackpotTiers.forEach(function(jt){jtRem+=jt.rem;jtPrinted+=jt.p});
-        var jtClaimed=jtPrinted-jtRem;
-        
-        // SVG donut
-        var r=55,cx=75,cy=75,sw=16;
-        var circ=2*Math.PI*r;
-        var jtClaimPct=jtPrinted>0?jtClaimed/jtPrinted:0;
-        var jtRemPct=jtPrinted>0?jtRem/jtPrinted:0;
-        var dash1=circ*jtClaimPct,gap1=circ*(1-jtClaimPct);
-        var dash2=circ*jtRemPct,gap2=circ*(1-jtRemPct);
-        o+='<div style="text-align:center">';
-        o+='<svg width="150" height="150" viewBox="0 0 150 150">';
-        o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#1a2332" stroke-width="'+sw+'"/>';
-        o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#e74c3c" stroke-width="'+sw+'" stroke-dasharray="'+dash1+' '+gap1+'" stroke-dashoffset="'+(circ*0.25)+'" stroke-linecap="round"/>';
-        o+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#2ecc71" stroke-width="'+sw+'" stroke-dasharray="'+dash2+' '+gap2+'" stroke-dashoffset="'+(circ*0.25-dash1)+'" stroke-linecap="round"/>';
-        o+='<text x="'+cx+'" y="'+(cy-6)+'" text-anchor="middle" fill="'+(jtRem>0?'#2ecc71':'#e74c3c')+'" font-size="20" font-weight="800">'+jtRem+'</text>';
-        o+='<text x="'+cx+'" y="'+(cy+8)+'" text-anchor="middle" fill="#8899aa" font-size="9">of '+jtPrinted+'</text>';
-        o+='<text x="'+cx+'" y="'+(cy+20)+'" text-anchor="middle" fill="#8899aa" font-size="8">JACKPOTS LEFT</text>';
-        o+='</svg>';
-        o+='</div>';
-        
-        // Per-tier breakdown rows
-        jackpotTiers.forEach(function(jt){
-          var pctLeft=jt.p>0?jt.rem/jt.p:0;
-          var clr=jt.rem<=0?"var(--red)":pctLeft>0.5?"var(--grn)":"var(--amb)";
-          // Pack odds: remaining packs / remaining prizes for this tier
-          var packOdds=sel.epr>0&&jt.rem>0?Math.round(sel.epr/jt.rem):0;
-          // Launch pack odds for comparison
-          var launchPackOdds=sel.pc>0&&jt.p>0?Math.round(sel.pc/jt.p):0;
-          // Odds change
-          var oddsImproved=packOdds>0&&launchPackOdds>0&&packOdds<launchPackOdds;
-          var oddsWorse=packOdds>0&&launchPackOdds>0&&packOdds>launchPackOdds;
-          var oddsRatio=launchPackOdds>0&&packOdds>0?launchPackOdds/packOdds:0;
-          
-          o+='<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-top:1px solid #ffffff10">';
-          // Prize amount
-          o+='<div style="flex:0 0 60px;font-weight:800;color:'+clr+';font-size:13px">$'+fN(jt.a)+'</div>';
-          // Remaining / printed
-          o+='<div style="flex:1;font-size:10px">';
-          if(jt.rem<=0){
-            o+='<span style="color:var(--red);font-weight:700">ALL CLAIMED</span>';
-          }else{
-            o+='<span style="color:var(--wht);font-weight:600">'+jt.rem+' of '+jt.p+'</span>';
-            o+='<span style="color:var(--dim)"> left</span>';
-          }
-          o+='</div>';
-          // Pack odds
-          o+='<div style="flex:0 0 auto;text-align:right;font-size:10px">';
-          if(packOdds>0){
-            o+='<div style="color:var(--wht);font-weight:700">1:'+fN(packOdds)+'</div>';
-            if(oddsImproved){
-              o+='<div style="color:var(--grn);font-size:8px">'+oddsRatio.toFixed(1)+'x better</div>';
-            }else if(oddsWorse){
-              o+='<div style="color:var(--red);font-size:8px">'+(1/oddsRatio).toFixed(1)+'x worse</div>';
-            }else{
-              o+='<div style="color:var(--dim);font-size:8px">vs 1:'+fN(launchPackOdds)+' launch</div>';
-            }
-          }else if(jt.rem<=0){
-            o+='<div style="color:var(--red);font-size:9px">—</div>';
-          }
-          o+='</div>';
-          o+='</div>';
-        });
-        
-        // Overall: combined jackpot pack odds using hypergeometric
-        if(sel.epr>0&&jtRem>0){
-          // P(at least 1 jackpot tier in a pack) = 1 - C(etr-jtRem,pk)/C(etr,pk)
-          var jHyper=0;
-          if(sel.etr>0&&sel.g.pk>0){
-            function jLogC(n,k){if(k>n||k<0)return-Infinity;if(k===0||k===n)return 0;if(k>n-k)k=n-k;var s=0;for(var i2=1;i2<=k;i2++)s+=Math.log(n-i2+1)-Math.log(i2);return s}
-            var jlp0=jLogC(sel.etr-jtRem,sel.g.pk)-jLogC(sel.etr,sel.g.pk);
-            jHyper=1-Math.exp(jlp0);
-          }
-          // Launch hypergeometric
-          var jHyperL=0;
-          if(sel.g.tot>0&&sel.g.pk>0&&jtPrinted>0){
-            var jlp0L=jLogC(sel.g.tot-jtPrinted,sel.g.pk)-jLogC(sel.g.tot,sel.g.pk);
-            jHyperL=1-Math.exp(jlp0L);
-          }
-          var jRatio=jHyperL>0?jHyper/jHyperL:0;
-          
-          o+='<div style="margin-top:6px;padding:6px;background:#ffffff08;border-radius:6px;text-align:center">';
-          o+='<div style="font-size:9px;color:var(--dim)">JACKPOT IN A PACK (hypergeometric)</div>';
-          o+='<div style="font-size:14px;font-weight:800;color:'+(jHyper>=0.01?'var(--wht)':'var(--dim)');
-          o+='">'+(jHyper>=0.01?pct(jHyper):'1:'+fN(Math.round(1/jHyper)))+'</div>';
-          if(jRatio>0){
-            var jClr=jRatio>1.05?"var(--grn)":jRatio<0.95?"var(--red)":"var(--dim)";
-            o+='<div style="font-size:9px;color:'+jClr+';font-weight:600">'+jRatio.toFixed(2)+'x vs launch'+(jRatio>1.05?' ▲':jRatio<0.95?' ▼':'')+'</div>';
-          }
-          o+='</div>';
-        }else if(jtRem===0){
-          o+='<div style="margin-top:6px;padding:6px;background:var(--red)15;border-radius:6px;text-align:center">';
-          o+='<div style="font-size:11px;color:var(--red);font-weight:700">ALL JACKPOTS CLAIMED</div>';
-          o+='</div>';
-        }
-      }
-      o+='</div>';
-      o+='</div></div>';
-      o+='<div class="C"><div class="L" style="margin-bottom:10px">PRIZE POOL — CLAIMED vs REMAINING</div>';
-      sel.prizes.forEach(function(p){
-        var pctC=p.p>0?p.c/p.p*100:0;var pctR=100-pctC;
-        var clrMap={"TOP":"#9b59b6","MID":"#3498db","BTP":"#2ecc71","BELOW":"#5a6a7a"};
-        var clr=p.isA?"#2ecc71":clrMap[p.cat]||"#5a6a7a";
-        o+='<div class="bar-row"><div class="bar-label" style="color:'+clr+'">$'+fN(p.a);
-        if(p.isA)o+=' <span style="font-size:7px;opacity:.7">BTP</span>';
-        o+='</div><div class="bar-track">';
-        o+='<div style="width:'+pctC+'%;height:100%;background:'+clr+';opacity:.25"></div>';
-        o+='<div style="width:'+pctR+'%;height:100%;background:'+clr+';opacity:.7"></div>';
-        o+='<div class="bar-pct">'+fN(p.rem)+' left ('+pctR.toFixed(0)+'%)</div></div></div>';
-      });
-      o+='<div style="margin-top:6px;font-size:10px;color:var(--dim)"><span style="color:#2ecc71">■</span> BTP · <span style="color:#9b59b6">■</span> TOP · <span style="color:#3498db">■</span> MID · Dark=claimed · Bright=remaining</div></div>';
-      
-      // Markov velocity
+
+      // === PRIZE BARS ===
+      o+='<div class="C"><div class="L" style="margin-bottom:8px">PRIZE POOL</div>';
+      sel.prizes.forEach(function(p){var pC=p.p>0?p.c/p.p*100:0,pR=100-pC;var c=p.cat==="JACKPOT"?"#d4a017":p.cat==="MID"?"#9b59b6":p.isA?"#2ecc71":"#3498db";
+        o+='<div class="bar-row"><div class="bar-label" style="color:'+c+'">$'+fN(p.a)+(p.isA?' BTP':'')+(p.isJackpot?' 🎯':'')+'</div><div class="bar-track"><div style="width:'+pC+'%;height:100%;background:'+c+';opacity:.25"></div><div style="width:'+pR+'%;height:100%;background:'+c+';opacity:.7"></div><div class="bar-pct">'+fN(p.rem)+' ('+pR.toFixed(0)+'%)</div></div></div>';});
+      o+='<div style="font-size:10px;margin-top:4px" class="d"><span style="color:#d4a017">■</span>JK <span style="color:#9b59b6">■</span>MID <span style="color:#2ecc71">■</span>BTP <span style="color:#3498db">■</span>FLOOR</div></div>';
+
+      // === MARKOV ===
       if(sel.gm.ts.length>0){
-        o+='<div class="C"><div class="L" style="margin-bottom:8px">MARKOV VELOCITY — <span style="color:'+(sel.gm.sig==="STRONG_BUY"||sel.gm.sig==="BUY"?"var(--grn)":sel.gm.sig==="AVOID"||sel.gm.sig==="DEAD"?"var(--red)":sel.gm.sig==="CAUTION"||sel.gm.sig==="MIXED"?"var(--amb)":"var(--dim)")+'">'+sel.gm.sig.replace("_"," ")+'</span></div>';
-        o+='<div style="font-size:11px;color:var(--text);margin-bottom:10px">'+esc(sel.gm.rsn)+'</div>';
-        sel.gm.ts.forEach(function(t){
-          var tc=t.sig==="HOT"?"#2ecc71":t.sig==="COLD"?"#e74c3c":"#5a6a7a";
-          o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">';
-          o+='<span style="width:70px;text-align:right;font-weight:600;font-size:11px;color:var(--wht)">$'+fN(t.a)+'</span>';
-          o+='<span style="width:30px;font-size:8px;color:var(--dim)">'+t.cat+'</span>';
-          o+='<div style="flex:1;height:20px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative">';
-          o+='<div style="width:'+Math.min(100,Math.max(2,t.ar*100))+'%;height:100%;background:'+tc+';opacity:.65;border-radius:4px"></div>';
-          o+='<div style="position:absolute;left:'+Math.min(95,Math.max(0,t.er*100))+'%;top:0;width:2px;height:100%;background:#f39c12"></div></div>';
-          o+='<span style="width:50px;font-size:10px;font-weight:700;color:'+tc+'">'+(t.sig==="HOT"?"HOT":t.sig==="COLD"?"COLD":"—")+'</span></div>';
-        });
-        o+='<div style="font-size:10px;color:var(--dim);margin-top:6px">Bar=actual claim rate · Yellow line=expected (BTP rate) · HOT=underclaimed (good)</div></div>';
-      }
-      
-      // Tier advantage
-      if(sel.tierAdv.length>0){
-        o+='<div class="C"><div class="L" style="margin-bottom:8px">TIER ADVANTAGE — CURRENT vs LAUNCH ODDS</div>';
-        sel.tierAdv.forEach(function(t){
-          var better=t.pctB>0;
-          o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
-          o+='<div style="width:70px;text-align:right;font-weight:700;font-size:12px;color:var(--pur)">$'+fN(t.a)+'</div>';
-          o+='<div style="width:30px;font-size:8px;color:var(--dim)">'+t.cat+'</div>';
-          o+='<div style="flex:1;font-size:11px;color:var(--text)">'+fmtO(t.origO)+' → '+fmtO(t.currO)+'</div>';
-          o+='<div style="width:60px;text-align:right;font-size:12px;font-weight:700;color:'+(better?"var(--grn)":"var(--red)")+'">'+(better?"+":"")+t.pctB.toFixed(0)+'%</div>';
-          o+='<div style="width:50px;font-size:10px;color:var(--dim)">'+fN(t.rem)+' left</div></div>';
-        });
-        o+='</div>';
-      }
-      
-      // Above vs Below BTP
-      if(sel.abvPct>0||sel.blwPct>0){
-        o+='<div class="C"><div class="L" style="margin-bottom:10px">ABOVE vs BELOW BTP — POOL HEALTH</div>';
-        var matW=sel.mat*100;
-        // Above BTP bar
-        o+='<div style="margin-bottom:10px"><div style="font-size:10px;color:var(--pur);font-weight:600;margin-bottom:4px">ABOVE BTP — outlier prizes (what you want)</div>';
-        o+='<div style="height:26px;background:var(--bg);border-radius:5px;overflow:hidden;position:relative">';
-        o+='<div style="width:'+(sel.abvPct*100)+'%;height:100%;background:linear-gradient(90deg,#9b59b6,#8e44ad);border-radius:5px"></div>';
-        o+='<div style="position:absolute;left:'+matW+'%;top:0;width:2px;height:100%;background:#f39c12"></div>';
-        o+='<span style="position:absolute;right:8px;top:5px;font-size:11px;color:#fff;font-weight:700">'+(sel.abvPct*100).toFixed(1)+'% claimed</span></div></div>';
-        // Below BTP bar
-        o+='<div style="margin-bottom:8px"><div style="font-size:10px;color:var(--blu);font-weight:600;margin-bottom:4px">BELOW BTP — base prizes (expected sales pace)</div>';
-        o+='<div style="height:26px;background:var(--bg);border-radius:5px;overflow:hidden;position:relative">';
-        o+='<div style="width:'+(sel.blwPct*100)+'%;height:100%;background:linear-gradient(90deg,#3498db,#2980b9);border-radius:5px"></div>';
-        o+='<div style="position:absolute;left:'+matW+'%;top:0;width:2px;height:100%;background:#f39c12"></div>';
-        o+='<span style="position:absolute;right:8px;top:5px;font-size:11px;color:#fff;font-weight:700">'+(sel.blwPct*100).toFixed(1)+'% claimed</span></div></div>';
-        // Interpretation
-        o+='<div style="font-size:11px;color:var(--text);padding:8px 10px;background:var(--bg);border-radius:6px">';
-        o+='<span style="color:#f39c12;font-weight:600">Yellow line</span> = game maturity ('+matW.toFixed(1)+'% sold). ';
-        if(sel.abvPct<sel.mat*0.85)o+='<span style="color:var(--grn);font-weight:600">Outlier prizes lagging behind sales — remaining packs are enriched.</span>';
-        else if(sel.abvPct>sel.mat*1.15)o+='<span style="color:var(--red);font-weight:600">Outlier prizes claimed faster than sales — remaining packs depleted.</span>';
-        else o+='<span style="color:var(--dim)">Claims tracking near expected pace.</span>';
-        o+='</div></div>';
-      }
-      
-      // Prize table
-      o+='<div class="C" style="overflow-x:auto"><div class="L" style="margin-bottom:8px">FULL PRIZE TABLE</div><table><thead><tr>';
-      ["Prize","Cat","Printed","Claimed","Left","% Left","Launch Odds","Now Odds","Shift"].forEach(function(h){o+='<th>'+h+'</th>';});
+        o+='<div class="C"><div class="L" style="margin-bottom:8px">MARKOV — <span style="color:'+("BUY STRONG_BUY".indexOf(sel.gm.sig)>=0?"var(--grn)":"AVOID DEAD".indexOf(sel.gm.sig)>=0?"var(--red)":"var(--dim)")+'">'+sel.gm.sig.replace(/_/g," ")+'</span></div>';
+        o+='<div style="font-size:11px;margin-bottom:8px">'+esc(sel.gm.rsn)+'</div>';
+        sel.gm.ts.forEach(function(t){var tc=t.sig==="HOT"?"#2ecc71":t.sig==="COLD"?"#e74c3c":"#5a6a7a";
+          o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><span style="width:70px;text-align:right;font-weight:600;font-size:11px">$'+fN(t.a)+'</span><span style="width:45px;font-size:8px;color:'+(t.isJackpot?'var(--gld)':'var(--dim)')+'">'+t.cat+'</span><div style="flex:1;height:20px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative"><div style="width:'+Math.min(100,Math.max(2,t.ar*100))+'%;height:100%;background:'+tc+';opacity:.65;border-radius:4px"></div><div style="position:absolute;left:'+Math.min(95,Math.max(0,t.er*100))+'%;top:0;width:2px;height:100%;background:#f39c12"></div></div><span style="width:45px;font-size:10px;font-weight:700;color:'+tc+'">'+(t.sig==="NORMAL"?"—":t.sig)+'</span></div>';});
+        o+='<div style="font-size:10px;margin-top:4px" class="d">Bar=claim rate · Yellow=BTP rate · JK tiers drive score</div></div>';}
+
+      // === SCORE BREAKDOWN ===
+      o+='<div class="C"><div class="L" style="margin-bottom:8px">SCORE ('+sel.sc+'/100)</div><div style="font-size:10px" class="d">Base: 50</div>';
+      sel.scoreBreakdown.forEach(function(s){var c=s.p>0?"var(--grn)":s.p<0?"var(--red)":"var(--dim)";o+='<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:11px"><span>'+esc(s.f)+'</span><span style="font-weight:700;color:'+c+'">'+(s.p>0?"+":"")+s.p+'</span></div>';});
+      o+='<div style="border-top:1px solid var(--border);margin-top:4px;padding-top:4px;display:flex;justify-content:space-between;font-weight:700"><span>FINAL</span><span style="color:'+(sel.sc>=65?"var(--grn)":sel.sc>=40?"var(--amb)":"var(--red)")+'">'+sel.sc+'</span></div></div>';
+
+      // === TREND ===
+      var tr2=getTrend(sel.g.id);
+      if(tr2.length>=3){
+        o+='<div class="C"><div class="L" style="margin-bottom:8px">TREND ('+tr2.length+' days)</div>';
+        o+='<div style="display:flex;gap:20px;flex-wrap:wrap">';
+        [{l:"Score",f:"sc"},{l:"JK Density",f:"jd"},{l:"JK Left",f:"jr"},{l:"Top Left",f:"tpr"}].forEach(function(s){
+          o+='<div><div class="L" style="font-size:8px">'+s.l+'</div>'+sparkline(tr2,s.f,24)+'<div style="font-size:10px;font-weight:700;margin-top:2px">'+tr2[tr2.length-1][s.f]+'</div></div>';});
+        o+='</div></div>';}
+
+      // === FULL TABLE ===
+      o+='<div class="C" style="overflow-x:auto"><div class="L" style="margin-bottom:8px">PRIZE TABLE</div><table><thead><tr>';
+      ["Prize","Cat","Printed","Claimed","Left","%","Launch","Now","Shift"].forEach(function(h){o+='<th>'+h+'</th>';});
       o+='</tr></thead><tbody>';
-      sel.prizes.forEach(function(p){
-        var rc=p.cat==="TOP"?"var(--pur)":p.cat==="MID"?"var(--blu)":p.isA?"var(--grn)":"var(--wht)";
-        var pctL=100-p.pctC;
-        o+='<tr><td style="font-weight:700;color:'+rc+'">$'+fN(p.a)+'</td>';
-        o+='<td style="font-size:9px;color:var(--dim)">'+p.cat+'</td>';
-        o+='<td class="d">'+fN(p.p)+'</td><td class="d">'+fN(p.c)+'</td>';
-        o+='<td style="font-weight:700;color:'+(p.rem>0?"var(--grn)":"var(--red)")+'">'+fN(p.rem)+'</td>';
-        o+='<td style="color:'+(pctL>50?"var(--grn)":pctL>20?"var(--amb)":"var(--red)")+'">'+pctL.toFixed(0)+'%</td>';
-        o+='<td class="d">'+fmtO(p.origO)+'</td>';
-        o+='<td>'+(p.rem>0?fmtO(p.currO):"-")+'</td>';
-        o+='<td>';if(p.rem>0&&p.currO<1e9){var b=p.currO<p.origO;o+='<span style="color:'+(b?"var(--grn)":"var(--red)")+'">'+(b?"BETTER":"WORSE")+'</span>';}
+      sel.prizes.forEach(function(p){var rc=p.cat==="JACKPOT"?"var(--gld)":p.cat==="MID"?"var(--pur)":p.isA?"var(--grn)":"var(--wht)";var pL=100-p.pctC;
+        o+='<tr'+(p.isJackpot?' style="background:#d4a01708"':'')+'><td style="font-weight:700;color:'+rc+'">$'+fN(p.a)+(p.highSens?' ⚡':'')+'</td><td style="font-size:9px" class="d">'+p.cat+'</td><td class="d">'+fN(p.p)+'</td><td class="d">'+fN(p.c)+'</td><td style="font-weight:700;color:'+(p.rem>0?"var(--grn)":"var(--red)")+'">'+fN(p.rem)+'</td><td style="color:'+(pL>50?"var(--grn)":pL>20?"var(--amb)":"var(--red)")+'">'+pL.toFixed(0)+'%</td><td class="d">'+fmtO(p.origO)+'</td><td>'+(p.rem>0?fmtO(p.currO):"-")+'</td><td>';
+        if(p.rem>0&&p.currO<1e9){var bt=p.currO<p.origO;o+='<span style="color:'+(bt?"var(--grn)":"var(--red)")+'">'+(bt?"BETTER":"WORSE")+'</span>';}
         o+='</td></tr>';});
       o+='</tbody></table></div>';
-      
-      // Insights for this game
-      if(sel.flags.length>0){
-        o+='<div class="C"><div class="L" style="margin-bottom:8px">SIGNALS</div>';
-        sel.flags.forEach(function(fl){
-          o+='<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;padding:6px 8px;background:var(--bg);border-radius:6px;border-left:3px solid var(--'+fl.c+')">';
-          o+='<div style="font-size:9px;font-weight:700;color:var(--'+fl.c+');white-space:nowrap;min-width:80px">'+esc(fl.t)+'</div>';
-          o+='<div style="font-size:11px;color:var(--text)">'+esc(fl.m)+'</div></div>';
-        });
-        o+='</div>';
-      }
-      o+='<div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap"><div class="B on" onclick="startPack(\''+sel.g.id+'\')">Track Pack →</div>';
-      o+='<div class="B" style="border-color:#9b59b6;color:#9b59b6" onclick="copyAIPrompt(\''+sel.g.id+'\')">📋 Copy Prompt</div>';
-      o+='<div class="B" style="border-color:#9b59b6;color:#9b59b6" onclick="showAIPrompt(\''+sel.g.id+'\')">👁 Show Prompt</div>';
-      o+='<div class="B" style="border-color:#9b59b6;color:#9b59b6" onclick="downloadAIPrompt(\''+sel.g.id+'\')">⬇ .txt</div></div>';
-      if(S._promptPreview){o+='<div class="C" style="margin-top:8px;border-color:#9b59b644"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div class="L" style="color:#9b59b6">GENERATED PROMPT</div><div class="B" style="font-size:9px;padding:3px 8px;border-color:#9b59b6;color:#9b59b6" onclick="S._promptPreview=null;render()">✕ Close</div></div><pre style="font-size:10px;color:var(--text);white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto;background:var(--bg);padding:10px;border-radius:6px;line-height:1.5;margin:0">'+esc(S._promptPreview)+'</pre></div>';}
+
+      // Flags
+      if(sel.flags.length){o+='<div class="C"><div class="L" style="margin-bottom:8px">SIGNALS</div>';sel.flags.forEach(function(fl){o+='<div style="display:flex;gap:8px;margin-bottom:5px;padding:5px 8px;background:var(--bg);border-radius:6px;border-left:3px solid var(--'+fl.c+')"><div style="font-size:9px;font-weight:700;color:var(--'+fl.c+');min-width:75px">'+esc(fl.t)+'</div><div style="font-size:11px">'+esc(fl.m)+'</div></div>';});o+='</div>';}
+
+      // Actions
+      o+='<div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap"><div class="B on" onclick="startPack(\''+sel.g.id+'\')">Track Pack →</div><div class="B pn" onclick="copyAIPrompt(\''+sel.g.id+'\')">📋 Prompt</div><div class="B pn" onclick="showAIPrompt(\''+sel.g.id+'\')">👁 Show</div></div>';
+      if(S._promptPreview){o+='<div class="C" style="margin-top:8px;border-color:#9b59b644"><div style="display:flex;justify-content:space-between"><div class="L" style="color:#9b59b6">PROMPT</div><div class="B" style="font-size:9px;padding:2px 8px" onclick="S._promptPreview=null;render()">✕</div></div><pre style="font-size:10px;white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto;background:var(--bg);padding:8px;border-radius:6px;margin:6px 0 0">'+esc(S._promptPreview)+'</pre></div>';}
     }
   }
 
-  // === INSIGHTS (pattern detection + LLM briefing) ===
+  // ==================== INSIGHTS ====================
   if(S.tab==="insights"){
-    
-    // === AI PROMPT GENERATOR ===
-    o+='<div class="C" style="border-color:#9b59b644"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div>';
-    o+='<div style="font-size:14px;font-weight:800;color:#9b59b6">🧠 AI ANALYSIS</div>';
-    o+='<div style="font-size:10px;color:var(--dim)">Generate a prompt with game data, paste into any AI chat</div></div>';
-    o+='<div class="B" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6" onclick="copyAllPrompt()">📋 Copy</div>';
-    o+='<div class="B" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6" onclick="showAllPrompt()">👁 Show</div>';
-    o+='<div class="B" style="font-size:10px;padding:5px 12px;border-color:#9b59b6;color:#9b59b6" onclick="downloadAllPrompt()">⬇ .txt</div></div></div>';
-    // Show which games would be included
-    var triggered=[];
-    S.data.forEach(function(a){
-      if(!a.complete)return;
-      var dominated=false;
-      if(a.hyperRatio>1.1||a.returnGap>0.03||(a.tpr===a.tp.p&&a.mat>0.2)||(a.g.cs&&a.tpr>0)||((a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY")&&a.tpr>0))dominated=true;
-      if(a.gm.sig==="AVOID"||a.gm.sig==="DEAD"||a.returnGap<-0.03)dominated=true;
-      if(dominated)triggered.push(a);
-    });
-    o+='<div style="margin-top:8px;font-size:11px;color:var(--dim)">'+triggered.length+' games with significant signals included in prompt</div>';
-    if(triggered.length>0){
-      o+='<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">';
-      triggered.sort(function(a,b){return b.sc-a.sc}).slice(0,20).forEach(function(t){
-        o+='<span class="ck" onclick="openDetail(\''+t.g.id+'\')" style="font-size:9px;padding:3px 8px;background:#9b59b618;border:1px solid #9b59b630;border-radius:4px;color:#9b59b6;cursor:pointer">'+esc(t.g.nm)+' $'+t.g.pr+' ['+t.sc+']</span>'});
-      if(triggered.length>20)o+='<span style="font-size:9px;padding:3px 8px;color:var(--dim)">+'+(triggered.length-20)+' more</span>';
-      o+='</div>';
-    }
-    if(S._allPromptPreview){o+='<div style="margin-top:8px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div class="L" style="color:#9b59b6">GENERATED PROMPT</div><div class="B" style="font-size:9px;padding:3px 8px;border-color:#9b59b6;color:#9b59b6" onclick="S._allPromptPreview=null;render()">✕ Close</div></div><pre style="font-size:10px;color:var(--text);white-space:pre-wrap;word-break:break-word;max-height:500px;overflow-y:auto;background:var(--bg);padding:10px;border-radius:6px;line-height:1.5;margin:0">'+esc(S._allPromptPreview)+'</pre></div>';}
+    o+='<div class="C" style="border-color:#9b59b644"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><div style="font-size:14px;font-weight:800;color:#9b59b6">🧠 AI ANALYSIS</div><div style="font-size:10px" class="d">Generate prompt, paste into any AI</div></div>';
+    o+='<div class="B pn" onclick="copyAllPrompt()">📋 Copy</div><div class="B pn" onclick="showAllPrompt()">👁 Show</div></div>';
+    var trg=[];S.data.forEach(function(a){if(!a.complete||!a.btpInfo.hasJackpot)return;if(a.jackpotDensityShift>1.1||a.hyperRatio>1.1||a.returnGap>0.03||(a.g.cs&&a.tpr>0)||a.gm.sig==="BUY"||a.gm.sig==="STRONG_BUY"||a.gm.sig==="AVOID"||a.gm.sig==="DEAD"||a.returnGap<-0.03)trg.push(a);});
+    o+='<div style="margin-top:6px;font-size:11px" class="d">'+trg.length+' games with signals</div>';
+    if(trg.length){o+='<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px">';trg.sort(function(a,b){return b.sc-a.sc}).slice(0,20).forEach(function(t){o+='<span class="ck" onclick="openDetail(\''+t.g.id+'\')" style="font-size:9px;padding:3px 8px;background:#9b59b618;border:1px solid #9b59b630;border-radius:4px;color:#9b59b6">'+esc(t.g.nm)+' $'+t.g.pr+' ['+t.sc+']</span>';});o+='</div>';}
+    if(S._allPromptPreview){o+='<div style="margin-top:8px"><div style="display:flex;justify-content:space-between"><div class="L" style="color:#9b59b6">PROMPT</div><div class="B" style="font-size:9px;padding:2px 8px" onclick="S._allPromptPreview=null;render()">✕</div></div><pre style="font-size:10px;white-space:pre-wrap;word-break:break-word;max-height:500px;overflow-y:auto;background:var(--bg);padding:8px;border-radius:6px;margin:6px 0 0">'+esc(S._allPromptPreview)+'</pre></div>';}
     o+='</div>';
-    
+
     var ins=[];
     S.data.forEach(function(a){
-      var gLabel=a.g.nm+" #"+a.g.gn;
-      if(a.g.cs&&a.tpr>0)ins.push({pri:3,cat:"CLOSING",title:gLabel+" — "+a.tpr+" top prizes left",detail:"Odds: "+fmtO(a.tpo)+" · "+pct(1-a.mat)+" tickets remain.",c:"var(--amb)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      if(a.tpr===0)ins.push({pri:8,cat:"TOP GONE",title:gLabel+" — all "+fmt(a.tp.a)+" claimed",detail:"No top prizes remain.",c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      if(a.returnGap>0.02)ins.push({pri:2,cat:"RICH POOL",title:gLabel+" — remaining "+(a.returnGap*100).toFixed(1)+"% richer",detail:"Return gap: sold="+pct(a.soldReturn/a.g.pr)+" vs remaining="+pct(a.remainReturnPct),c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      if(a.returnGap<-0.02)ins.push({pri:7,cat:"THIN POOL",title:gLabel+" — remaining "+(Math.abs(a.returnGap)*100).toFixed(1)+"% thinner",detail:"Better prizes already claimed disproportionately.",c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      if(a.hyperRatio>1.2)ins.push({pri:2,cat:"TOP TIER+",title:gLabel+" — top-tier odds "+a.hyperRatio.toFixed(1)+"x launch",detail:"P(top in pack): "+pct(a.hyperNow)+" now vs "+pct(a.hyperLaunch)+" at launch.",c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      if(a.gm.sig==="STRONG_BUY")ins.push({pri:1,cat:"STRONG BUY",title:gLabel+" — Top prizes underclaimed",detail:a.gm.rsn,c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      if(a.gm.sig==="DEAD")ins.push({pri:9,cat:"DEAD GAME",title:gLabel+" — All top prizes gone",detail:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      if(a.gm.sig==="AVOID")ins.push({pri:7,cat:"AVOID",title:gLabel+" — Top prizes depleting fast",detail:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      if(a.mat<0.08&&a.complete)ins.push({pri:4,cat:"NEW",title:gLabel+" — only "+pct(a.mat)+" sold",detail:"Full prize pool. All "+a.tp.p+" top prizes available.",c:"var(--blu)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      a.gm.ts.forEach(function(t){if(t.sig==="HOT"&&t.dev<-0.15&&t.rem>0)ins.push({pri:3,cat:"$"+fN(t.a)+" HOT",title:gLabel+" — $"+fN(t.a)+" underclaimed "+(Math.abs(t.dev)*100).toFixed(0)+"%",detail:t.rem+" remain. Category: "+t.cat,c:"var(--pur)",pr:a.g.pr,id:a.g.id,sc:a.sc})});
-      // Pack structure patterns
-      if(a.ps&&a.ps.valid&&a.ps.topShift){
-        if(a.ps.signal==="STRONG_BUY")ins.push({pri:1,cat:"CONCENTRATED",title:gLabel+" — top prize "+a.ps.topShift.shift.toFixed(1)+"x density",detail:a.ps.signalReason+" Confidence: "+a.ps.confidence,c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-        if(a.ps.signal==="AVOID")ins.push({pri:7,cat:"DEPLETED",title:gLabel+" — top prize "+a.ps.topShift.shift.toFixed(1)+"x density",detail:a.ps.signalReason,c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
-      }
+      var gl=a.g.nm+" #"+a.g.gn;
+      if(a.g.cs&&a.tpr>0)ins.push({pri:3,cat:"CLOSING",t:gl+" — "+a.tpr+" top left",d:fmtO(a.tpo)+" odds",c:"var(--amb)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.tpr===0)ins.push({pri:8,cat:"TOP GONE",t:gl,d:"All "+fmt(a.tp.a)+" claimed",c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.jackpotDensityShift>1.2)ins.push({pri:1,cat:"JK DENSE",t:gl+" — "+a.jackpotDensityShift.toFixed(1)+"x",d:"Jackpots concentrated",c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.hyperRatio>1.2)ins.push({pri:2,cat:"JK ODDS+",t:gl+" — "+a.hyperRatio.toFixed(1)+"x launch",d:"",c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.gm.sig==="STRONG_BUY")ins.push({pri:1,cat:"STRONG BUY",t:gl,d:a.gm.rsn,c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.gm.sig==="DEAD")ins.push({pri:9,cat:"DEAD",t:gl,d:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.gm.sig==="AVOID")ins.push({pri:7,cat:"AVOID",t:gl,d:a.gm.rsn,c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.hollowedOut)ins.push({pri:6,cat:"HOLLOWED",t:gl,d:"Top exists but mid gone",c:"var(--amb)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.returnGap>0.02)ins.push({pri:4,cat:"RICH",t:gl+" +"+(a.returnGap*100).toFixed(1)+"%",d:"",c:"var(--grn)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.returnGap<-0.02)ins.push({pri:7,cat:"THIN",t:gl+" "+(a.returnGap*100).toFixed(1)+"%",d:"",c:"var(--red)",pr:a.g.pr,id:a.g.id,sc:a.sc});
+      if(a.mat<0.08&&a.complete)ins.push({pri:5,cat:"FRESH",t:gl+" "+pct(a.mat),d:"Full pool",c:"var(--blu)",pr:a.g.pr,id:a.g.id,sc:a.sc});
     });
-    // Best per price
     var byP={};S.data.forEach(function(a){if(!byP[a.g.pr]||a.sc>byP[a.g.pr].sc)byP[a.g.pr]=a});
-    Object.keys(byP).forEach(function(pr){var a=byP[pr];var cnt=S.data.filter(function(x){return x.g.pr===a.g.pr}).length;
-      if(cnt>=2)ins.push({pri:5,cat:"BEST $"+pr,title:a.g.nm+" #"+a.g.gn+" leads "+cnt+" games at $"+pr,detail:"Score: "+a.sc+" · Gap: "+(a.returnGap>0?"+":"")+pct(a.returnGap)+" · "+a.tpr+"/"+a.tp.p+" top left",c:"var(--blu)",pr:a.g.pr,id:a.g.id,sc:a.sc})});
-    // Sort: positive signals first (low pri), then within same pri, higher score first
+    Object.keys(byP).forEach(function(pr2){var a=byP[pr2];var cnt=S.data.filter(function(x){return x.g.pr===a.g.pr}).length;if(cnt>=2)ins.push({pri:5,cat:"BEST $"+pr2,t:a.g.nm+" #"+a.g.gn,d:"Score:"+a.sc+" of "+cnt+" games",c:"var(--blu)",pr:a.g.pr,id:a.g.id,sc:a.sc});});
     ins.sort(function(a,b){return a.pri!==b.pri?a.pri-b.pri:b.sc-a.sc});
-    
-    o+='<div class="C"><div style="font-size:14px;font-weight:800;color:var(--wht);margin-bottom:4px">PATTERN DETECTION</div>';
-    o+='<div style="font-size:11px;color:var(--dim);margin-bottom:8px">'+S.data.length+' games · '+ins.length+' patterns · Real data only</div></div>';
+
+    o+='<div class="C"><div style="font-size:14px;font-weight:800">PATTERNS</div><div style="font-size:11px" class="d">'+ins.length+' from '+S.data.length+' games</div></div>';
     ins.forEach(function(n){
-      o+='<div class="C ck" onclick="openDetail(\''+n.id+'\')" style="border-left:3px solid '+n.c+'">';
-      o+='<div style="display:flex;justify-content:space-between;gap:8px"><div>';
+      o+='<div class="C ck" onclick="openDetail(\''+n.id+'\')" style="border-left:3px solid '+n.c+'"><div style="display:flex;justify-content:space-between;gap:8px"><div>';
       o+='<div style="display:flex;gap:6px;margin-bottom:3px"><span style="font-size:9px;font-weight:700;color:'+n.c+'">'+esc(n.cat)+'</span>';
       if(n.pr)o+='<span style="font-size:9px;font-weight:800;color:#fff;background:'+prClr(n.pr)+';padding:1px 6px;border-radius:3px">$'+n.pr+'</span>';
-      o+='</div><div style="font-size:13px;font-weight:700;color:var(--wht)">'+esc(n.title)+'</div>';
-      o+='<div style="font-size:11px;color:var(--text);margin-top:3px">'+esc(n.detail)+'</div></div>';
-      o+='<div style="font-size:18px;opacity:.3">›</div></div></div>';
+      o+='</div><div style="font-size:13px;font-weight:700;color:var(--wht)">'+esc(n.t)+'</div>';
+      if(n.d)o+='<div style="font-size:11px;margin-top:2px">'+esc(n.d)+'</div>';
+      o+='</div><div style="font-size:18px;opacity:.3">›</div></div></div>';
     });
   }
 
-  // === WINNERS ===
+  // ==================== WINNERS ====================
   if(S.tab==="winners"){
-    if(!S.winData)S.winData=JSON.parse(localStorage.getItem("txwd6")||"{}");
+    if(!S.winData)S.winData=JSON.parse(localStorage.getItem("txwd7")||"{}");
     var allW=[];Object.keys(S.winData).forEach(function(gn){(S.winData[gn]||[]).forEach(function(w){w.gn=Number(gn);allW.push(w)})});
-    
-    o+='<div class="C"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div>';
-    o+='<div style="font-size:16px;font-weight:800;color:var(--wht)">WINNER DATA</div>';
-    o+='<div style="font-size:11px;color:var(--dim)">'+allW.length+' winners</div></div>';
-    o+='<div class="B'+(S._fetching?"":" on")+'" onclick="fetchWinners()">'+(S._fetching?'FETCHING...':'FETCH WINNERS')+'</div></div></div>';
-    
+    o+='<div class="C"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:16px;font-weight:800">WINNERS</div><div style="font-size:11px" class="d">'+allW.length+' records</div></div><div class="B'+(S._fetching?"":" on")+'" onclick="fetchWinners()">'+(S._fetching?'...':'FETCH')+'</div></div></div>';
     if(allW.length>0){
-      // Hot stores
       var stores={};allW.forEach(function(w){if(!w.store)return;var k=w.store.toUpperCase().trim();if(!stores[k])stores[k]={name:w.store,city:w.city||"",count:0};stores[k].count++});
       var hot=Object.values(stores).filter(function(s){return s.count>=2}).sort(function(a,b){return b.count-a.count});
-      if(hot.length){
-        o+='<div class="C"><div class="L" style="color:var(--grn);margin-bottom:8px">REPEAT STORES ('+hot.length+')</div>';
-        hot.forEach(function(s){o+='<div style="padding:6px 0;border-bottom:1px solid #1e2d3d20;display:flex;justify-content:space-between"><div style="font-size:12px;color:var(--wht)">'+esc(s.name)+' <span class="d">'+esc(s.city)+'</span></div><div class="g" style="font-weight:800">'+s.count+'x</div></div>'});
-        o+='</div>';
-      }
-      // Table
+      if(hot.length){o+='<div class="C"><div class="L" style="color:var(--grn);margin-bottom:6px">REPEAT STORES</div>';hot.forEach(function(s){o+='<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1e2d3d20"><div style="font-size:12px">'+esc(s.name)+' <span class="d">'+esc(s.city)+'</span></div><div class="g" style="font-weight:800">'+s.count+'x</div></div>';});o+='</div>';}
       o+='<div class="C" style="overflow-x:auto"><table><thead><tr>';
       ["Date","Game","Store","City","Pack#","Tk#"].forEach(function(h){o+='<th style="text-align:left">'+h+'</th>'});
       o+='</tr></thead><tbody>';
       allW.sort(function(a,b){return(b.date||"").localeCompare(a.date||"")}).slice(0,200).forEach(function(w){
-        o+='<tr><td style="text-align:left;font-size:10px">'+esc(w.date||"-")+'</td>';
-        o+='<td style="text-align:left;font-size:10px;color:var(--wht)">#'+w.gn+'</td>';
-        o+='<td style="text-align:left;font-size:10px">'+esc(w.store||"-")+'</td>';
-        o+='<td style="text-align:left;font-size:10px">'+esc(w.city||"-")+'</td>';
-        o+='<td style="text-align:left;font-size:10px;color:var(--blu)">'+(w.pn?fN(w.pn):"-")+'</td>';
-        o+='<td style="text-align:left;font-size:10px;color:var(--amb)">'+(w.tk||"-")+'</td></tr>';
-      });
+        o+='<tr><td style="text-align:left;font-size:10px">'+esc(w.date||"-")+'</td><td style="text-align:left;font-size:10px">#'+w.gn+'</td><td style="text-align:left;font-size:10px">'+esc(w.store||"-")+'</td><td style="text-align:left;font-size:10px">'+esc(w.city||"-")+'</td><td style="text-align:left;font-size:10px;color:var(--blu)">'+(w.pn?fN(w.pn):"-")+'</td><td style="text-align:left;font-size:10px;color:var(--amb)">'+(w.tk||"-")+'</td></tr>';});
       o+='</tbody></table></div>';
     }
   }
 
-  // === MORE (Pack P&L + Bankroll) ===
+  // ==================== MORE ====================
   if(S.tab==="more"){
-    o+='<div class="FR">';
-    [["pack","PACK P&L"],["bank","BANKROLL"]].forEach(function(t){o+='<div class="B'+(S.moreTab===t[0]?" on":"")+'" onclick="setMore(\''+t[0]+'\')">'+t[1]+'</div>';});
-    o+='</div>';
+    o+='<div class="FR">';[["pack","PACK P&L"],["bank","BANKROLL"]].forEach(function(t){o+='<div class="B'+(S.moreTab===t[0]?" on":"")+'" onclick="setMore(\''+t[0]+'\')">'+t[1]+'</div>';});o+='</div>';
     if(S.moreTab==="pack"){
       var pk2=S.pack,mk=mkv();
-      o+='<div class="C"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div>';
-      o+='<div style="font-size:15px;font-weight:700;color:var(--wht)">'+(pk2.nm||"Select game from Detail tab")+'</div>';
-      o+='<div style="font-size:10px;color:var(--dim)">$'+pk2.pr+' · '+pk2.pk+'/pack · BTP:$'+pk2.aa+'</div></div>';
+      o+='<div class="C"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div><div style="font-size:15px;font-weight:700;color:var(--wht)">'+(pk2.nm||"Select from Detail")+'</div><div style="font-size:10px" class="d">$'+pk2.pr+' · '+pk2.pk+'/pk · BTP:$'+pk2.aa+'</div></div>';
       o+='<div style="text-align:right"><div style="font-size:24px;font-weight:800;color:'+((pk2.won-pk2.spent)>=0?"var(--grn)":"var(--red)")+'">'+((pk2.won-pk2.spent)>=0?"+":"")+'$'+(pk2.won-pk2.spent)+'</div><div class="L">P&L</div></div></div></div>';
-      if(mk&&pk2.nm){
-        var mkc=mk.dec==="BUY"?"var(--grn)":mk.dec==="STOP"?"var(--red)":mk.dec==="CONSIDER"?"var(--amb)":"var(--blu)";
-        o+='<div class="C"><div class="L" style="color:var(--blu)">MARKOV MID-PACK</div>';
-        o+='<div class="G GA" style="margin:10px 0">';
-        [{l:"Left",v:mk.rem,c:"var(--wht)"},{l:"P(Win)",v:pct(mk.pW),c:"var(--blu)"},{l:"P(Anchor)",v:pct(mk.pA),c:pk2.af?"var(--dim)":"var(--grn)"},{l:"Found?",v:pk2.af?"YES":"NO",c:pk2.af?"var(--grn)":"var(--amb)"}].forEach(function(m){
-          o+='<div><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:16px;font-weight:700;color:'+m.c+'">'+m.v+'</div></div>';});
-        o+='</div><div style="padding:10px;background:var(--bg);border-radius:6px"><span style="font-size:14px;font-weight:700;color:'+mkc+'">'+mk.dec+'</span> <span style="font-size:11px;color:var(--text)">'+esc(mk.rsn)+'</span></div></div>';
-      }
+      if(mk&&pk2.nm){var mkc=mk.dec==="BUY"?"var(--grn)":mk.dec==="STOP"?"var(--red)":mk.dec==="CONSIDER"?"var(--amb)":"var(--blu)";
+        o+='<div class="C"><div class="L" style="color:var(--blu)">MARKOV MID-PACK</div><div class="G GA" style="margin:8px 0">';
+        [{l:"Left",v:mk.rem,c:"var(--wht)"},{l:"P(Win)",v:pct(mk.pW),c:"var(--blu)"},{l:"P(Anchor)",v:pct(mk.pA),c:pk2.af?"var(--dim)":"var(--grn)"},{l:"Found?",v:pk2.af?"YES":"NO",c:pk2.af?"var(--grn)":"var(--amb)"}].forEach(function(m){o+='<div><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:16px;font-weight:700;color:'+m.c+'">'+m.v+'</div></div>';});
+        o+='</div><div style="padding:8px;background:var(--bg);border-radius:6px"><span style="font-size:14px;font-weight:700;color:'+mkc+'">'+mk.dec+'</span> <span style="font-size:11px">'+esc(mk.rsn)+'</span></div></div>';}
       o+='<div class="C"><div class="L" style="margin-bottom:8px">LOG TICKET</div><div class="FR">';
       o+='<div class="B rn" onclick="scratch(0)">LOSER</div>';
-      var qb=[pk2.pr,pk2.pr*2,pk2.pr*5,pk2.aa,pk2.aa*2],seen2={};
-      for(i=0;i<qb.length;i++){if(!seen2[qb[i]]){seen2[qb[i]]=1;o+='<div class="B'+(qb[i]>=pk2.aa?" pn":" on")+'" onclick="scratch('+qb[i]+')">$'+fN(qb[i])+'</div>'}}
-      o+='<input type="number" id="cAmt" class="I" style="width:80px;display:inline-block" placeholder="$">';
-      o+='<div class="B bn" onclick="var v=document.getElementById(\'cAmt\').value;if(v){scratch(+v);document.getElementById(\'cAmt\').value=\'\'}">LOG</div></div>';
-      o+='<div style="display:flex;gap:16px;margin:10px 0">';
-      [{l:"Done",v:pk2.log.length+"/"+pk2.pk,c:"var(--wht)"},{l:"Spent",v:"$"+pk2.spent,c:"var(--red)"},{l:"Won",v:"$"+pk2.won,c:"var(--grn)"},{l:"ROI",v:pk2.spent>0?pct(pk2.won/pk2.spent-1):"—",c:pk2.spent>0?(pk2.won>=pk2.spent?"var(--grn)":"var(--red)"):"var(--dim)"}].forEach(function(m){
-        o+='<div><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:18px;font-weight:700;color:'+m.c+'">'+m.v+'</div></div>';});
+      var qb2=[pk2.pr,pk2.pr*2,pk2.pr*5,pk2.aa,pk2.aa*2],sn2={};
+      for(var qi=0;qi<qb2.length;qi++){if(!sn2[qb2[qi]]){sn2[qb2[qi]]=1;o+='<div class="B'+(qb2[qi]>=pk2.aa?" pn":" on")+'" onclick="scratch('+qb2[qi]+')">$'+fN(qb2[qi])+'</div>';}}
+      o+='<input type="number" id="cAmt" class="I" style="width:80px;display:inline-block" placeholder="$"><div class="B bn" onclick="var v=document.getElementById(\'cAmt\').value;if(v){scratch(+v);document.getElementById(\'cAmt\').value=\'\'}">LOG</div></div>';
+      o+='<div style="display:flex;gap:16px;margin:8px 0">';
+      [{l:"Done",v:pk2.log.length+"/"+pk2.pk,c:"var(--wht)"},{l:"Spent",v:"$"+pk2.spent,c:"var(--red)"},{l:"Won",v:"$"+pk2.won,c:"var(--grn)"},{l:"ROI",v:pk2.spent>0?pct(pk2.won/pk2.spent-1):"—",c:pk2.spent>0?(pk2.won>=pk2.spent?"var(--grn)":"var(--red)"):"var(--dim)"}].forEach(function(m){o+='<div><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:18px;font-weight:700;color:'+m.c+'">'+m.v+'</div></div>';});
       o+='</div>';
       o+='<div style="background:var(--bg);border-radius:6px;height:20px;overflow:hidden"><div style="width:'+((pk2.log.length/pk2.pk)*100)+'%;height:100%;background:linear-gradient(90deg,var(--grn),var(--blu));border-radius:6px;transition:width .2s"></div></div>';
-      if(pk2.log.length>0){o+='<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:10px">';
-        pk2.log.forEach(function(e){o+='<div style="min-width:'+(e.w?34:24)+'px;height:20px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:'+(e.w?9:10)+'px;font-weight:600;padding:0 3px;background:'+(e.amt>=pk2.aa?"var(--pur1)":e.w?"var(--grn1)":"var(--bg)")+';color:'+(e.amt>=pk2.aa?"var(--pur)":e.w?"var(--grn)":"#1e2d3d")+';border:1px solid '+(e.amt>=pk2.aa?"#9b59b644":e.w?"#2ecc7130":"#1e2d3d44")+'">'+(e.w?"$"+e.amt:"x")+'</div>'});
-        o+='</div>';}
+      if(pk2.log.length>0){o+='<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:10px">';pk2.log.forEach(function(e){o+='<div style="min-width:'+(e.w?34:24)+'px;height:20px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:'+(e.w?9:10)+'px;font-weight:600;padding:0 3px;background:'+(e.amt>=pk2.aa?"var(--pur1)":e.w?"var(--grn1)":"var(--bg)")+';color:'+(e.amt>=pk2.aa?"var(--pur)":e.w?"var(--grn)":"#1e2d3d")+';border:1px solid '+(e.amt>=pk2.aa?"#9b59b644":e.w?"#2ecc7130":"#1e2d3d44")+'">'+(e.w?"$"+e.amt:"x")+'</div>';});o+='</div>';}
       o+='<div style="display:flex;gap:6px;margin-top:12px"><div class="B rn" onclick="resetPack()">RESET</div><div class="B on" onclick="saveSession()">SAVE</div></div></div>';
     }
     if(S.moreTab==="bank"){
       var tss=0,tsw=0;S.sessions.forEach(function(s){tss+=s.s;tsw+=s.w});
-      o+='<div class="C"><div class="L" style="margin-bottom:10px">BANKROLL</div>';
-      o+='<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px"><span class="d">Starting: $</span><input type="number" value="'+S.bankroll+'" onchange="setBR(+this.value)" class="I" style="width:110px"></div>';
+      o+='<div class="C"><div class="L" style="margin-bottom:8px">BANKROLL</div>';
+      o+='<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><span class="d">Starting: $</span><input type="number" value="'+S.bankroll+'" onchange="setBR(+this.value)" class="I" style="width:110px"></div>';
       o+='<div class="G GA">';
-      [{l:"BANKROLL",v:fmt(S.bankroll),c:"var(--wht)"},{l:"SPENT",v:fmt(tss),c:"var(--red)"},{l:"WON",v:fmt(tsw),c:"var(--grn)"},{l:"NET",v:((tsw-tss)>=0?"+":"")+fmt(tsw-tss),c:(tsw-tss)>=0?"var(--grn)":"var(--red)"},{l:"LEFT",v:fmt(S.bankroll-tss+tsw),c:"var(--wht)"}].forEach(function(m){
-        o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div class="V" style="color:'+m.c+'">'+m.v+'</div></div>';});
+      [{l:"BANKROLL",v:fmt(S.bankroll),c:"var(--wht)"},{l:"SPENT",v:fmt(tss),c:"var(--red)"},{l:"WON",v:fmt(tsw),c:"var(--grn)"},{l:"NET",v:((tsw-tss)>=0?"+":"")+fmt(tsw-tss),c:(tsw-tss)>=0?"var(--grn)":"var(--red)"},{l:"LEFT",v:fmt(S.bankroll-tss+tsw),c:"var(--wht)"}].forEach(function(m){o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div class="V" style="color:'+m.c+'">'+m.v+'</div></div>';});
       o+='</div></div>';
-      if(S.sessions.length>0){
-        o+='<div class="C"><div class="L" style="margin-bottom:8px">HISTORY</div>';
-        S.sessions.forEach(function(s){var pl=s.w-s.s;
-          o+='<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1e2d3d20"><div><div style="font-size:12px;color:var(--wht)">'+esc(s.g)+'</div><div style="font-size:10px;color:var(--dim)">'+s.t+' tk · '+s.d+'</div></div><div style="font-size:14px;font-weight:700;color:'+(pl>=0?"var(--grn)":"var(--red)")+'">'+(pl>=0?"+":"")+'$'+pl+'</div></div>';});
-        if(S.sessions.length>=2){var avgLoss=0;S.sessions.forEach(function(s){avgLoss+=s.s-s.w});avgLoss/=S.sessions.length;var remBR=S.bankroll-tss+tsw;var sessLeft=avgLoss>0?Math.floor(remBR/avgLoss):999;
-          o+='<div style="margin-top:12px;padding:10px 12px;background:var(--bg);border-radius:8px"><div class="L" style="color:var(--amb)">BURN RATE</div><div style="font-size:12px;color:var(--text);margin-top:6px">Avg loss/session: <strong style="color:var(--red)">$'+avgLoss.toFixed(0)+'</strong> · Sessions left: <strong style="color:'+(sessLeft<5?"var(--red)":"var(--amb)")+'">'+sessLeft+'</strong>'+(sessLeft<5?' · <strong style="color:var(--red)">LOW RUNWAY</strong>':'')+'</div></div>';}
-        o+='<div class="B rn" style="margin-top:10px" onclick="clearSess()">Clear</div></div>';
+      if(S.sessions.length){o+='<div class="C"><div class="L" style="margin-bottom:6px">HISTORY</div>';
+        S.sessions.forEach(function(s){var pl=s.w-s.s;o+='<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1e2d3d20"><div><div style="font-size:12px;color:var(--wht)">'+esc(s.g)+'</div><div style="font-size:10px" class="d">'+s.t+' tk · '+s.d+'</div></div><div style="font-size:14px;font-weight:700;color:'+(pl>=0?"var(--grn)":"var(--red)")+'">'+(pl>=0?"+":"")+'$'+pl+'</div></div>';});
+        if(S.sessions.length>=2){var avgL=0;S.sessions.forEach(function(s){avgL+=s.s-s.w});avgL/=S.sessions.length;var remBR=S.bankroll-tss+tsw;var sessL=avgL>0?Math.floor(remBR/avgL):999;
+          o+='<div style="margin-top:10px;padding:8px;background:var(--bg);border-radius:6px"><div class="L" style="color:var(--amb)">BURN RATE</div><div style="font-size:12px;margin-top:4px">Avg loss: <strong class="r">$'+avgL.toFixed(0)+'</strong> · Sessions left: <strong style="color:'+(sessL<5?"var(--red)":"var(--amb)")+'">'+sessL+'</strong></div></div>';}
+        o+='<div class="B rn" style="margin-top:8px" onclick="clearSess()">Clear</div></div>';
       }
     }
   }
 
-  o+='<div style="text-align:center;margin-top:30px;padding:14px 0;border-top:1px solid var(--border);font-size:9px;color:#1e2d3d88;line-height:1.6">TX Scratch-Off Engine v6 · Scraper-only data · No hardcoded values<br>Play responsibly · 1-800-522-4700</div>';
+  o+='<div style="text-align:center;margin-top:30px;padding:14px 0;border-top:1px solid var(--border);font-size:9px;color:#1e2d3d88;line-height:1.6">TX Engine v7 · Jackpot Focused · Fact-Based<br>Play responsibly · 1-800-522-4700</div>';
   document.getElementById("app").innerHTML=o;
 }
 init();
