@@ -1,7 +1,12 @@
 """
-Data feed scraper v2 - public gaming commission data
+Data feed scraper v2.1 - public gaming commission data
 Fetches prize data (CSV) + game details (HTML) + winner data (CSV)
 Zero hardcoding. All data from texaslottery.com.
+
+v2.1 changes from v2:
+- Expanded guarantee regex (6 patterns instead of 1, catches $100 games)
+- Pack size fallback patterns (3 patterns instead of 1)
+- Output shows guarantee count for verification
 """
 import csv
 import json
@@ -18,7 +23,7 @@ CSV_URL = BASE + "scratchoff.csv"
 INDEX_URL = BASE + "index.html"
 WINNER_URL = BASE + "retailerswhosoldtopprizes{}.csv"
 
-UA = {"User-Agent": "Mozilla/5.0 (compatible; DataSync/2.0)"}
+UA = {"User-Agent": "Mozilla/5.0 (compatible; DataSync/2.1)"}
 
 def fetch(url, retries=3):
     for i in range(retries):
@@ -86,12 +91,34 @@ def parse_detail_page(html):
     m = re.search(r'(?:approximately\s+)?([\d,]+)\*?\s*tickets\s+in\s+', html, re.IGNORECASE)
     if m:
         info["tot"] = int(m.group(1).replace(",", ""))
-    m = re.search(r'Pack\s*Size[:\s]+(\d+)', html, re.IGNORECASE)
-    if m:
-        info["pk"] = int(m.group(1))
-    m = re.search(r'Guaranteed\s+(?:Total\s+)?Prize\s+Amount\s*[=:]\s*\$?([\d,]+)', html, re.IGNORECASE)
-    if m:
-        info["guar"] = int(m.group(1).replace(",", ""))
+
+    # Pack size — v2.1: multiple fallback patterns
+    for pat in [
+        r'Pack\s*Size[:\s]+(\d+)',
+        r'(\d+)\s*tickets?\s+per\s+pack',
+        r'pack\s+(?:of|contains?)\s+(\d+)',
+    ]:
+        m = re.search(pat, html, re.IGNORECASE)
+        if m:
+            info["pk"] = int(m.group(1))
+            break
+
+    # Guaranteed prize — v2.1: expanded patterns for all game types ($2-$100)
+    for pat in [
+        r'Guaranteed\s+(?:Total\s+)?Prize\s+Amount\s*[=:]\s*\$?([\d,]+)',
+        r'Guaranteed\s+(?:Minimum\s+)?(?:Total\s+)?(?:Pack\s+)?(?:Prize|Payout|Return)\s*[=:]\s*\$?([\d,]+)',
+        r'(?:Minimum|Min\.?)\s+(?:Guaranteed\s+)?(?:Pack\s+)?(?:Prize|Payout|Return)\s*[=:]\s*\$?([\d,]+)',
+        r'(?:Each|Every)\s+pack\s+(?:is\s+)?guaranteed\s+.*?\$\s*([\d,]+)',
+        r'guaranteed\s+(?:at least|a minimum of)\s+\$\s*([\d,]+)',
+        r'pack\s+guarantee[:\s]+\$?([\d,]+)',
+    ]:
+        m = re.search(pat, html, re.IGNORECASE)
+        if m:
+            val = int(m.group(1).replace(",", ""))
+            if val > 0:
+                info["guar"] = val
+                break
+
     m = re.search(r'(?:Overall\s+)?odds\s+.*?1\s+in\s+([\d.]+)', html, re.IGNORECASE)
     if m:
         info["odds"] = float(m.group(1))
@@ -120,7 +147,7 @@ def find_detail_urls(html):
 
 def fetch_detail_for_games(games):
     """Fetch detail pages for all games missing metadata.
-    Strategy: 
+    Strategy:
     1. Try index page to find detail URLs
     2. For games still missing, try direct URL pattern
     """
@@ -131,10 +158,10 @@ def fetch_detail_for_games(games):
     if index_html:
         detail_urls = find_detail_urls(index_html)
         print(f"  Found {len(detail_urls)} detail URLs from index")
-    
+
     matched = 0
     matched_gns = set()
-    
+
     # Fetch URLs from index page
     for i, url in enumerate(detail_urls):
         print(f"  Detail {i+1}/{len(detail_urls)}...")
@@ -152,9 +179,9 @@ def fetch_detail_for_games(games):
             matched += 1
             matched_gns.add(gn)
         time.sleep(0.5)
-    
+
     # Step 2: direct URL pattern for games still missing data
-    missing = [gn for gn, g in games.items() 
+    missing = [gn for gn, g in games.items()
                if gn not in matched_gns and (g["tot"] == 0 or g["pk"] == 0)]
     if missing:
         print(f"  Trying direct URLs for {len(missing)} games still missing data...")
@@ -180,7 +207,7 @@ def fetch_detail_for_games(games):
                     break
                 time.sleep(0.3)
             time.sleep(0.3)
-    
+
     return matched
 
 def fetch_winners(game_numbers):
@@ -224,7 +251,7 @@ def fetch_winners(game_numbers):
 def main():
     os.makedirs("data", exist_ok=True)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    print(f"=== Feed sync v2 — {now} ===")
+    print(f"=== Feed sync v2.1 — {now} ===")
 
     # Step 1: CSV
     print("Step 1: Fetching prize data CSV...")
@@ -245,10 +272,16 @@ def main():
     print(f"  Matched metadata for {matched} games")
 
     missing = [g for g in games.values() if g["tot"] == 0 or g["pk"] == 0]
+    # v2.1: warn about missing guarantees specifically
+    missing_guar = [g for g in games.values() if g["guar"] == 0 and g["tot"] > 0]
     if missing:
         print(f"  WARNING: {len(missing)} games still missing detail data")
         for g in missing[:10]:
             print(f"    #{g['gn']} {g['nm']}")
+    if missing_guar:
+        print(f"  WARNING: {len(missing_guar)} games missing guaranteed prize amount")
+        for g in missing_guar[:10]:
+            print(f"    #{g['gn']} {g['nm']} (${g['pr']})")
 
     # Step 3: Winners
     with_claims = [gn for gn, g in games.items() if g["pz"] and g["pz"][0]["c"] > 0]
@@ -274,10 +307,13 @@ def main():
 
     has_tot = sum(1 for g in games.values() if g.get("tot", 0) > 0)
     has_pk = sum(1 for g in games.values() if g.get("pk", 0) > 0)
+    # v2.1: show guarantee count
+    has_guar = sum(1 for g in games.values() if g.get("guar", 0) > 0)
     print(f"\n=== Done ===")
     print(f"  Games: {len(games)}")
     print(f"  With total tickets: {has_tot}")
     print(f"  With pack size: {has_pk}")
+    print(f"  With guarantee: {has_guar}")
     print(f"  Winner records: {output['winner_count']}")
 
 if __name__ == "__main__":
