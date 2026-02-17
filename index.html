@@ -226,7 +226,8 @@ function analyze(g){
   // === RETURN GAP ===
   var soldReturn=ets>0?tpvc/ets:0;
   var remainReturn=etr>0?tpvr/etr:0;
-  var returnGap=soldReturn>0?(remainReturn-soldReturn)/soldReturn:0;
+  // Guard: return gap is noise when <10% sold (tiny denominator)
+  var returnGap=soldReturn>0&&mat>0.10?(remainReturn-soldReturn)/soldReturn:0;
   var remainReturnPct=etr>0&&g.pr>0?tpvr/(etr*g.pr):0;
 
   // === ABOVE-BTP tiers ===
@@ -264,9 +265,11 @@ function analyze(g){
     var role=i===0?"TOP":i===1?"TOP-1":"TOP-2";
     var wt=i<tierWeights.length?tierWeights[i]:0;
     // Claim lag: how far behind this tier is vs BTP claim rate
+    // NOTE: tiers >$599 have natural delay (must claim at lottery office, taxes)
     var claimLag=acr>0?(acr-(jt.printed>0?jt.claimed/jt.printed:0))/acr:0;
+    var claimDelayTier=jt.a>599; // subject to claim office delay
     jackpotShifts.push({a:jt.a,printed:jt.printed,remaining:jt.rem,claimed:jt.claimed,
-      launchOdds:lO,currentOdds:cO,shift:sh,role:role,weight:wt,claimLag:claimLag,
+      launchOdds:lO,currentOdds:cO,shift:sh,role:role,weight:wt,claimLag:claimLag,claimDelayTier:claimDelayTier,
       signal:jt.rem<=0?"GONE":sh>=1.5?"STRONG":sh>=1.2?"GOOD":sh>=0.9?"NEUTRAL":sh>=0.7?"WEAK":"DEPLETED"});
   }
 
@@ -404,11 +407,13 @@ function analyze(g){
     addPts(topAvailPts,"Top "+tpr+"/"+tp.p+" @ "+pct(mat)+" sold");
   }
 
-  // 3. Top prize specific lag: ±8 pts (NEW — how far top prize claim rate lags BTP)
+  // 3. Top prize specific lag: ±8 pts
+  // NOTE: Prizes >$599 require lottery office claim (tax paperwork).
+  // This creates a natural claim DELAY that inflates lag regardless of concentration.
+  // We dampen lag scoring slightly for >$599 tiers to account for this.
   if(topClaimLag!==0&&jackpotShifts.length>0&&mat>0.1){
-    // topClaimLag>0 means top tier is underclaimed vs BTP (good)
-    // topClaimLag of 1.0 = top tier 0% claimed while BTP is X% claimed (perfect lag)
-    addPts(Math.max(-8,Math.min(8,Math.round(topClaimLag*10))),"Top prize lag "+(topClaimLag>0?"+":"")+pct(topClaimLag));
+    var lagDampen=jackpotShifts[0].a>599?0.85:1.0; // 15% haircut for claim-office delay
+    addPts(Math.max(-8,Math.min(8,Math.round(topClaimLag*10*lagDampen))),"Top prize lag "+(topClaimLag>0?"+":"")+pct(topClaimLag)+(jackpotShifts[0].a>599?" (>$599 adj)":""));
   }
 
   // 4. Hypergeometric: ±10 pts (uses all tiers raw — mathematical probability)
@@ -735,14 +740,18 @@ function buildGamePrompt(a){
   L.push("Goal: Determine if the TOP PRIZE and TOP-1 prize tiers are statistically concentrated in the remaining unsold packs, making this game a better-than-launch buy.\n");
 
   L.push("--- METRIC DEFINITIONS ---");
-  L.push("• Score (0-100): Composite rating. 50=neutral. >65=buy candidate. <35=avoid. Driven primarily by jackpot density.");
-  L.push("• Jackpot Density Shift (jkD): (top_prizes_remaining / packs_remaining) ÷ (top_prizes_printed / total_packs). >1.0 means top prizes are MORE concentrated now than at launch. 1.5x+ is very strong.");
-  L.push("• Hypergeometric P(pack): Exact probability of getting ≥1 top-tier prize in one pack, compared to launch odds. Uses combinatorial math.");
-  L.push("• Jackpot EV: Expected dollar value from TOP + TOP-1 tiers per pack = Σ(prize × remaining ÷ remaining_packs). NOT total EV — just the rare upside.");
-  L.push("• Floor: GUARANTEED minimum return per pack (from TX Lottery website). Every pack pays at least this. It is a FACT, not an estimate.");
-  L.push("• BTP (Base Ticket Prize): Highest prize tier appearing ~1x per pack. Its claim rate = our clock for estimating packs sold.");
-  L.push("• Markov Signal: Compares each jackpot tier's claim rate to BTP claim rate. HOT=underclaimed (good). COLD=overclaimed (bad). BUY/AVOID/etc are aggregate signals.");
-  L.push("• Confidence: HIGH/MEDIUM/LOW based on agreement between 3 independent packs-sold estimation methods.\n");
+  L.push("• Score: Raw points (base 50). Each factor adds/subtracts based on real data. Higher = better.");
+  L.push("• Rank: Position among all games sorted by score. #1 = best.");
+  L.push("• Confidence %: Z-score — how many standard deviations this game is above/below the field mean. 85%+=STANDOUT, 70%+=ABOVE FIELD, 50%=AVERAGE.");
+  L.push("• Jackpot Density Shift (jkD): (top_prizes_remaining / packs_remaining) ÷ (top_prizes_printed / total_packs). >1.0 means top prizes are MORE concentrated now. 1.5x+ is very strong.");
+  L.push("• Claim Lag: How far a prize tier's claim rate lags behind BTP (ticket sales rate). Positive = underclaimed. NOTE: prizes >$599 must be claimed at lottery office (taxes), creating natural processing delay that inflates lag. Scoring dampens this by 30%.");
+  L.push("• Hypergeometric P(pack): Exact probability of getting ≥1 top-tier prize in one pack vs launch odds.");
+  L.push("• Top-tier EV: Expected dollar value from TOP + TOP-1 tiers per pack. NOT total EV — just the rare upside.");
+  L.push("• Floor: GUARANTEED minimum return per pack (from TX Lottery website). FACT, not estimate.");
+  L.push("• BTP (Base Ticket Prize): Highest prize tier appearing ~1x per pack (always ≤$599). Its claim rate = clock for packs sold.");
+  L.push("• Markov Signal: Compares each tier's claim rate to BTP rate. BUY=underclaimed. AVOID=overclaimed.");
+  L.push("• Data Confidence: HIGH/MEDIUM/LOW based on agreement between 3 packs-sold estimation methods.");
+  L.push("• IMPORTANT: Density calculations assume uniform distribution across remaining packs. In reality, TX Lottery uses algorithms to separate top prizes geographically. Our density is a CEILING (best case) of the actual concentration.\n");
 
   L.push("--- GAME FACTS (from TX Lottery website) ---");
   L.push("Ticket price: $"+g.pr);
@@ -771,7 +780,7 @@ function buildGamePrompt(a){
       L.push("$"+fN(j.a)+" ["+j.role+"] (score weight: "+Math.round(j.weight*100)+"%):");
       L.push("  Remaining: "+j.remaining+" of "+j.printed+" originally printed"+(j.remaining<=0?" → ALL CLAIMED":""));
       L.push("  Density shift: "+j.shift.toFixed(2)+"x ("+j.signal+")");
-      L.push("  Claim lag vs BTP: "+(j.claimLag>0?"+":"")+pct(j.claimLag)+(j.claimLag>0.1?" — LAGGING BEHIND sales (good: prizes sitting in unsold packs)":j.claimLag<-0.1?" — AHEAD of sales (bad: prizes being found faster than expected)":""));
+      L.push("  Claim lag vs BTP: "+(j.claimLag>0?"+":"")+pct(j.claimLag)+(j.claimDelayTier?" [>$599: includes lottery office claim delay]":"")+(j.claimLag>0.1?" — LAGGING BEHIND sales":j.claimLag<-0.1?" — AHEAD of sales":""));
       L.push("  Pack odds: 1 in "+fN(j.currentOdds)+" packs (was 1 in "+fN(j.launchOdds)+" at launch)");
       if(j.printed<=10)L.push("  ⚡ HIGH SENSITIVITY: only "+j.printed+" printed — each claim changes odds by "+(100/j.printed).toFixed(0)+"%+");
     });
