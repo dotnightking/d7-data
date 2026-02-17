@@ -1349,10 +1349,9 @@ function render(){
 
       // 10. Fragility — how sensitive is this score to the next claim?
       if(a.tpr>0&&a.tpr<=3&&a.tp.p>1){
-        var densityIfOneClaimed=a.tpr>1?((a.tpr-1)/a.epr)/(a.tp.p/a.pc):0;
-        var densityNow=a.epr>0?a.tpr/a.epr:0;
+        // Calculate what density shift would be if one more top prize is claimed
         var densityLaunch=a.pc>0?a.tp.p/a.pc:0;
-        var shiftIfClaimed=densityLaunch>0?densityIfOneClaimed/densityLaunch:0;
+        var shiftIfClaimed=a.tpr>1&&densityLaunch>0?((a.tpr-1)/a.epr)/densityLaunch:0;
         if(a.tpr===1) parts.push("Fragile: If the last top prize is claimed, this game dies. Act now or don't bother.");
         else parts.push("Fragility check: If 1 more top prize is claimed, density drops from "+a.jackpotDensityShift.toFixed(2)+"x to ~"+shiftIfClaimed.toFixed(2)+"x. Signal "+(shiftIfClaimed>1.1?"would survive":"may weaken significantly")+".");
       }
