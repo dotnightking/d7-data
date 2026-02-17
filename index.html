@@ -384,10 +384,22 @@ function analyze(g){
   var methodA=eps;
   var totalClaimed=0;for(i=0;i<g.pz.length;i++)totalClaimed+=g.pz[i].c;
   var methodB=g.odds>0&&g.pk>0?Math.round(totalClaimed/(g.pk/g.odds)):0;
-  var methodC=packPrice>0?Math.round(tpvc/(packPrice*0.70)):0;
+  // Method C: use actual designed return rate (from game data), not hardcoded
+  var yieldRate=designedReturn>0?designedReturn:0.70; // fallback only if no data
+  var methodC=packPrice>0&&yieldRate>0?Math.round(tpvc/(packPrice*yieldRate)):0;
   var methods=[methodA,methodB,methodC].filter(function(m){return m>0});
+  // Majority rules: if 2 of 3 agree within 5%, that's HIGH confidence
+  // Only LOW if all three diverge >10%
   var confidence="LOW";
-  if(methods.length>=2){var mx=Math.max.apply(null,methods),mn=Math.min.apply(null,methods);var sp=mx>0?(mx-mn)/mx:1;if(sp<=0.05)confidence="HIGH";else if(sp<=0.10)confidence="MEDIUM";}
+  if(methods.length>=2){
+    var pairs=[];
+    if(methodA>0&&methodB>0)pairs.push(Math.abs(methodA-methodB)/Math.max(methodA,methodB));
+    if(methodA>0&&methodC>0)pairs.push(Math.abs(methodA-methodC)/Math.max(methodA,methodC));
+    if(methodB>0&&methodC>0)pairs.push(Math.abs(methodB-methodC)/Math.max(methodB,methodC));
+    var bestPair=Math.min.apply(null,pairs);
+    if(bestPair<=0.05)confidence="HIGH";
+    else if(bestPair<=0.10)confidence="MEDIUM";
+  }
 
   // === SCORING — TOP PRIZE FOCUSED ===
   // Weights: TOP=100%, TOP-1=50%, TOP-2=display only
@@ -619,7 +631,9 @@ var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pac
   pack:{log:[],won:0,spent:0,af:false,pr:10,pk:50,nm:"",aa:100,ew:13},
   sessions:JSON.parse(localStorage.getItem("txs7")||"[]"),
   _promptPreview:null,_allPromptPreview:null,_promptMsg:null,
-  bankroll:Number(localStorage.getItem("txb7")||"1000")};
+  bankroll:Number(localStorage.getItem("txb7")||"1000"),
+  detailSearch:"",insightFilter:null,
+  winSearch:"",winSort:"date",winSortDir:-1,winGame:""};
 
 // === STATISTICAL SCORING: raw pts + rank + z-score confidence ===
 function applyStatScoring(data){
@@ -681,12 +695,17 @@ function init(){
   DD=localStorage.getItem("txr_date7")||"";
   render();refreshAllData();
 }
-function setTab(t){S.tab=t;render()}
+function setTab(t){S.tab=t;S.insightFilter=null;render()}
 function setMore(t){S.moreTab=t;render()}
 function setFilter(p){S.filterPr=p;render()}
 function setSort(s){S.sortBy=s;render()}
 function openDetail(id){S.selId=id;S.tab="detail";render()}
 function setSel(id){S.selId=id;render()}
+function setInsightFilter(f){S.insightFilter=S.insightFilter===f?null:f;S.tab="picks";render()}
+function detailSearchInput(v){S.detailSearch=v;render()}
+function winSearchInput(v){S.winSearch=v;render()}
+function winSortBy(col){if(S.winSort===col)S.winSortDir*=-1;else{S.winSort=col;S.winSortDir=-1;}render()}
+function winGameFilter(gn){S.winGame=gn;render()}
 
 // === DATA LOADING (unchanged) ===
 var DATA_URL="data/feed.json";
@@ -744,7 +763,7 @@ function buildGamePrompt(a){
   L.push("• Rank: Position among all games sorted by score. #1 = best.");
   L.push("• Confidence %: Z-score — how many standard deviations this game is above/below the field mean. 85%+=STANDOUT, 70%+=ABOVE FIELD, 50%=AVERAGE.");
   L.push("• Jackpot Density Shift (jkD): (top_prizes_remaining / packs_remaining) ÷ (top_prizes_printed / total_packs). >1.0 means top prizes are MORE concentrated now. 1.5x+ is very strong.");
-  L.push("• Claim Lag: How far a prize tier's claim rate lags behind BTP (ticket sales rate). Positive = underclaimed. NOTE: prizes >$599 must be claimed at lottery office (taxes), creating natural processing delay that inflates lag. Scoring dampens this by 30%.");
+  L.push("• Claim Lag: How far a prize tier's claim rate lags behind BTP (ticket sales rate). Positive = underclaimed. NOTE: prizes >$599 must be claimed at lottery office, creating minor travel delay. Scoring dampens this by 15%.");
   L.push("• Hypergeometric P(pack): Exact probability of getting ≥1 top-tier prize in one pack vs launch odds.");
   L.push("• Top-tier EV: Expected dollar value from TOP + TOP-1 tiers per pack. NOT total EV — just the rare upside.");
   L.push("• Floor: GUARANTEED minimum return per pack (from TX Lottery website). FACT, not estimate.");
@@ -807,7 +826,7 @@ function buildGamePrompt(a){
 
   L.push("--- VALIDATION ---");
   L.push("Packs sold estimates: Method A (BTP clock)="+fN(a.methodA)+" | Method B (prize count)="+fN(a.methodB)+" | Method C ($yield)="+fN(a.methodC));
-  L.push("Agreement: "+a.dataConfidence+(a.dataConfidence==="HIGH"?" (all methods within 5%)":a.dataConfidence==="MEDIUM"?" (within 10%)":"  (>10% divergence — treat analysis with caution)"));
+  L.push("Agreement: "+a.dataConfidence+(a.dataConfidence==="HIGH"?" (best pair within 5%)":a.dataConfidence==="MEDIUM"?" (best pair within 10%)":" (all pairs >10% — treat with caution)"));
   L.push("Implied yield: "+pct(a.impliedYield)+(a.yieldValid?" (reasonable)":"  ⚠ outside expected range"));
   L.push("");
 
@@ -910,6 +929,18 @@ function render(){
   var pr={};GD.forEach(function(g){pr[g.pr]=1});var pArr=Object.keys(pr).map(Number).sort(function(a,b){return a-b});
   var f=S.data.slice();
   if(S.filterPr!=="all")f=f.filter(function(a){return a.g.pr===Number(S.filterPr)});
+  // Insight filter (from clickable stats)
+  if(S.insightFilter){
+    var iF=S.insightFilter;
+    if(iF==="all"){}// show all
+    else if(iF==="top")f=f.filter(function(a){return a.btpInfo.hasJackpot});
+    else if(iF==="buy")f=f.filter(function(a){return a.confidence>=70&&a.btpInfo.hasJackpot});
+    else if(iF==="avoid")f=f.filter(function(a){return a.confidence<30&&a.btpInfo.hasJackpot});
+    else if(iF==="closing")f=f.filter(function(a){return a.g.cs&&a.tpr>0&&a.btpInfo.hasJackpot});
+    else if(iF==="new")f=f.filter(function(a){return a.mat<0.15&&a.complete&&a.btpInfo.hasJackpot});
+    else if(iF==="concentrated")f=f.filter(function(a){return a.jackpotDensityShift>=1.3});
+    else if(iF==="depleted")f=f.filter(function(a){return a.tpr===0&&a.btpInfo.hasJackpot});
+  }
   var sorts={score:function(a,b){return b.sc-a.sc},density:function(a,b){return b.jackpotDensityShift-a.jackpotDensityShift},gap:function(a,b){return b.returnGap-a.returnGap},topOdds:function(a,b){return a.tpo-b.tpo},tickets:function(a,b){return a.mat-b.mat},hyper:function(a,b){return b.hyperRatio-a.hyperRatio},jackpotEV:function(a,b){return b.jackpotEV-a.jackpotEV}};
   f.sort(sorts[S.sortBy]||sorts.score);
   var sel=null;if(S.selId){for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===S.selId){sel=S.data[i];break}}
@@ -926,6 +957,11 @@ function render(){
 
   // ==================== PICKS ====================
   if(S.tab==="picks"){
+    // Show active insight filter if any
+    if(S.insightFilter){
+      var filterLabels={all:"ALL GAMES",top:"WITH TOP PRIZES",buy:"BUY CANDIDATES (70%+)",avoid:"AVOID (<30%)",closing:"CLOSING",new:"NEW GAMES (<15% sold)",concentrated:"DENSITY 1.3x+",depleted:"TOP PRIZES GONE"};
+      o+='<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;margin-bottom:8px;background:#2ecc7115;border:1px solid #2ecc7130;border-radius:8px"><div style="font-size:11px;font-weight:700;color:var(--grn)">FILTER: '+(filterLabels[S.insightFilter]||S.insightFilter)+' ('+f.length+' games)</div><div class="B" style="font-size:9px;padding:2px 10px" onclick="S.insightFilter=null;render()">✕ CLEAR</div></div>';
+    }
     o+='<div class="FR"><span class="L" style="margin:0">PRICE:</span>';
     ["all"].concat(pArr).forEach(function(p){var v=String(p);o+='<div class="B'+(S.filterPr===v?" on":"")+'" onclick="setFilter(\''+v+'\')" style="padding:5px 10px">'+(v==="all"?"ALL":"$"+v)+'</div>';});
     o+='</div><div class="FR"><span class="L" style="margin:0">SORT:</span>';
@@ -981,9 +1017,19 @@ function render(){
 
   // ==================== DETAIL ====================
   if(S.tab==="detail"){
-    o+='<select class="I" style="margin-bottom:14px" onchange="setSel(this.value)"><option value="">— Select game —</option>';
-    S.data.slice().sort(function(a,b){return b.sc-a.sc}).forEach(function(a){o+='<option value="'+a.g.id+'"'+(S.selId===a.g.id?" selected":"")+'>['+a.sc+'] '+esc(a.g.nm)+' #'+a.g.gn+' ($'+a.g.pr+')</option>';});
-    o+='</select>';
+    // Search + dropdown
+    o+='<div style="margin-bottom:14px">';
+    o+='<input class="I" type="text" placeholder="Search by game name or number..." value="'+esc(S.detailSearch)+'" oninput="detailSearchInput(this.value)" style="margin-bottom:6px">';
+    var detailList=S.data.slice().sort(function(a,b){return b.sc-a.sc});
+    var sq=S.detailSearch.toLowerCase().trim();
+    if(sq)detailList=detailList.filter(function(a){return a.g.nm.toLowerCase().indexOf(sq)>=0||String(a.g.gn).indexOf(sq)>=0});
+    o+='<select class="I" onchange="setSel(this.value)"><option value="">— '+(sq?detailList.length+' matching':'Select game')+' —</option>';
+    detailList.forEach(function(a){
+      var confLbl=a.confLabel||"";
+      var confClr2=a.confidence>=70?"🟢":a.confidence>=50?"🟡":"🔴";
+      o+='<option value="'+a.g.id+'"'+(S.selId===a.g.id?" selected":"")+'>'+confClr2+' $'+a.g.pr+' | '+esc(a.g.nm)+' #'+a.g.gn+' | '+a.sc+'pts #'+a.rank+' | '+a.confidence+'% '+confLbl+'</option>';
+    });
+    o+='</select></div>';
     if(sel){
       // Header
       o+='<div class="C"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div>';
@@ -1135,8 +1181,8 @@ function render(){
     if(topDepleted.length>0)o+='<strong class="r">'+topDepleted.length+'</strong> with ALL top prizes gone. ';
     o+='</div>';
     o+='<div class="G" style="grid-template-columns:repeat(auto-fit,minmax(80px,1fr));margin-top:10px">';
-    [{l:"TOTAL",v:totGames,c:"var(--wht)"},{l:"WITH TOP",v:jkGames,c:"var(--blu)"},{l:"BUY 70%+",v:buyGames,c:"var(--grn)"},{l:"AVOID <30%",v:avoidGames,c:"var(--red)"},{l:"CLOSING",v:closingWithJk.length,c:"var(--amb)"},{l:"NEW <15%",v:newGames.length,c:"var(--blu)"},{l:"JK 1.3x+",v:topConcentrated.length,c:"var(--pur)"},{l:"TOP GONE",v:topDepleted.length,c:"var(--red)"}].forEach(function(m){
-      o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:18px;font-weight:800;color:'+m.c+'">'+m.v+'</div></div>';});
+    [{l:"TOTAL",v:totGames,c:"var(--wht)",f:"all"},{l:"WITH TOP",v:jkGames,c:"var(--blu)",f:"top"},{l:"BUY 70%+",v:buyGames,c:"var(--grn)",f:"buy"},{l:"AVOID <30%",v:avoidGames,c:"var(--red)",f:"avoid"},{l:"CLOSING",v:closingWithJk.length,c:"var(--amb)",f:"closing"},{l:"NEW <15%",v:newGames.length,c:"var(--blu)",f:"new"},{l:"JK 1.3x+",v:topConcentrated.length,c:"var(--pur)",f:"concentrated"},{l:"TOP GONE",v:topDepleted.length,c:"var(--red)",f:"depleted"}].forEach(function(m){
+      o+='<div class="cl" style="cursor:pointer" onclick="setInsightFilter(\''+m.f+'\')"><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:18px;font-weight:800;color:'+m.c+'">'+m.v+'</div></div>';});
     o+='</div></div>';
 
     // Cluster detection — which price point has the hottest pool?
@@ -1385,16 +1431,80 @@ function render(){
   if(S.tab==="winners"){
     if(!S.winData)S.winData=JSON.parse(localStorage.getItem("txwd7")||"{}");
     var allW=[];Object.keys(S.winData).forEach(function(gn){(S.winData[gn]||[]).forEach(function(w){w.gn=Number(gn);allW.push(w)})});
+
+    // Enrich with game name
+    allW.forEach(function(w){
+      var gm=null;for(var i=0;i<S.data.length;i++)if(Number(S.data[i].g.gn)===w.gn){gm=S.data[i];break}
+      w._nm=gm?gm.g.nm:"#"+w.gn;
+      w._pr=gm?gm.g.pr:0;
+    });
+
     o+='<div class="C"><div style="display:flex;justify-content:space-between;align-items:center"><div><div style="font-size:16px;font-weight:800">WINNERS</div><div style="font-size:11px" class="d">'+allW.length+' records</div></div><div class="B'+(S._fetching?"":" on")+'" onclick="fetchWinners()">'+(S._fetching?'...':'FETCH')+'</div></div></div>';
+
     if(allW.length>0){
-      var stores={};allW.forEach(function(w){if(!w.store)return;var k=w.store.toUpperCase().trim();if(!stores[k])stores[k]={name:w.store,city:w.city||"",count:0};stores[k].count++});
+      // Search bar
+      o+='<div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap">';
+      o+='<input class="I" type="text" placeholder="Search store, city, game..." value="'+esc(S.winSearch)+'" oninput="winSearchInput(this.value)" style="flex:1;min-width:180px">';
+      // Game filter dropdown
+      var wGames={};allW.forEach(function(w){wGames[w.gn]=w._nm});
+      var wgKeys=Object.keys(wGames).sort(function(a,b){return Number(a)-Number(b)});
+      o+='<select class="I" style="max-width:220px" onchange="winGameFilter(this.value)"><option value="">All games ('+wgKeys.length+')</option>';
+      wgKeys.forEach(function(gn){o+='<option value="'+gn+'"'+(S.winGame===gn?" selected":"")+'>'+esc(wGames[gn])+' #'+gn+'</option>';});
+      o+='</select></div>';
+
+      // Filter data
+      var wf=allW.slice();
+      if(S.winGame)wf=wf.filter(function(w){return String(w.gn)===S.winGame});
+      var wq=S.winSearch.toLowerCase().trim();
+      if(wq)wf=wf.filter(function(w){return(w.store||"").toLowerCase().indexOf(wq)>=0||(w.city||"").toLowerCase().indexOf(wq)>=0||w._nm.toLowerCase().indexOf(wq)>=0||String(w.gn).indexOf(wq)>=0||(w.zip||"").indexOf(wq)>=0});
+
+      // Sort
+      var wSorts={date:function(a,b){return(a.date||"").localeCompare(b.date||"")},store:function(a,b){return(a.store||"").localeCompare(b.store||"")},city:function(a,b){return(a.city||"").localeCompare(b.city||"")},game:function(a,b){return a.gn-b.gn},pack:function(a,b){return(a.pn||0)-(b.pn||0)},ticket:function(a,b){return(a.tk||0)-(b.tk||0)}};
+      var wSortFn=wSorts[S.winSort]||wSorts.date;
+      wf.sort(function(a,b){return wSortFn(a,b)*S.winSortDir});
+
+      // Repeat stores (from filtered set)
+      var stores={};wf.forEach(function(w){if(!w.store)return;var k=w.store.toUpperCase().trim();if(!stores[k])stores[k]={name:w.store,city:w.city||"",count:0};stores[k].count++});
       var hot=Object.values(stores).filter(function(s){return s.count>=2}).sort(function(a,b){return b.count-a.count});
-      if(hot.length){o+='<div class="C"><div class="L" style="color:var(--grn);margin-bottom:6px">REPEAT STORES</div>';hot.forEach(function(s){o+='<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1e2d3d20"><div style="font-size:12px">'+esc(s.name)+' <span class="d">'+esc(s.city)+'</span></div><div class="g" style="font-weight:800">'+s.count+'x</div></div>';});o+='</div>';}
-      o+='<div class="C" style="overflow-x:auto"><table><thead><tr>';
-      ["Date","Game","Store","City","Pack#","Tk#"].forEach(function(h){o+='<th style="text-align:left">'+h+'</th>'});
+      if(hot.length){o+='<div class="C"><div class="L" style="color:var(--grn);margin-bottom:6px">REPEAT STORES'+(S.winGame||wq?' (filtered)':'')+'</div>';hot.forEach(function(s){o+='<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1e2d3d20"><div style="font-size:12px">'+esc(s.name)+' <span class="d">'+esc(s.city)+'</span></div><div class="g" style="font-weight:800">'+s.count+'x</div></div>';});o+='</div>';}
+
+      // Analytics — distribution by city
+      var cities={};wf.forEach(function(w){if(!w.city)return;var c=w.city.toUpperCase().trim();cities[c]=(cities[c]||0)+1;});
+      var topCities=Object.keys(cities).map(function(c){return{city:c,count:cities[c]}}).sort(function(a,b){return b.count-a.count}).slice(0,15);
+      if(topCities.length>1){
+        o+='<div class="C"><div class="L" style="color:var(--pur);margin-bottom:6px">PRIZE DISTRIBUTION BY CITY'+(S.winGame?' (#'+S.winGame+')':'')+'</div>';
+        var mxCity=topCities[0].count;
+        topCities.forEach(function(c){
+          var w3=mxCity>0?(c.count/mxCity*100):0;
+          o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;cursor:pointer" onclick="winSearchInput(\''+c.city.toLowerCase()+'\')">';
+          o+='<div style="width:100px;font-size:10px;text-align:right;color:var(--dim)">'+c.city+'</div>';
+          o+='<div style="flex:1;height:14px;background:var(--bg);border-radius:3px;overflow:hidden"><div style="width:'+w3+'%;height:100%;background:var(--pur);opacity:.6"></div></div>';
+          o+='<div style="font-size:10px;font-weight:700;width:30px">'+c.count+'</div></div>';
+        });
+        o+='</div>';
+      }
+
+      // Data table with sortable headers
+      o+='<div class="C" style="overflow-x:auto"><div style="font-size:10px;color:var(--dim);margin-bottom:6px">'+wf.length+' records'+(wf.length>300?' (showing 300)':'')+'</div>';
+      o+='<table><thead><tr>';
+      [["date","Date"],["game","Game"],["store","Store"],["city","City"],["","Zip"],["pack","Pack#"],["ticket","Tk#"],["","Addr"]].forEach(function(h){
+        var sortable=h[0]!=="";
+        var isActive=S.winSort===h[0];
+        o+='<th style="text-align:left;cursor:'+(sortable?'pointer':'default')+';color:'+(isActive?'var(--grn)':'inherit')+'"'+(sortable?' onclick="winSortBy(\''+h[0]+'\')"':'')+'>'+h[1]+(isActive?(S.winSortDir>0?' ▲':' ▼'):'')+'</th>';
+      });
       o+='</tr></thead><tbody>';
-      allW.sort(function(a,b){return(b.date||"").localeCompare(a.date||"")}).slice(0,200).forEach(function(w){
-        o+='<tr><td style="text-align:left;font-size:10px">'+esc(w.date||"-")+'</td><td style="text-align:left;font-size:10px">#'+w.gn+'</td><td style="text-align:left;font-size:10px">'+esc(w.store||"-")+'</td><td style="text-align:left;font-size:10px">'+esc(w.city||"-")+'</td><td style="text-align:left;font-size:10px;color:var(--blu)">'+(w.pn?fN(w.pn):"-")+'</td><td style="text-align:left;font-size:10px;color:var(--amb)">'+(w.tk||"-")+'</td></tr>';});
+      wf.slice(0,300).forEach(function(w){
+        o+='<tr>';
+        o+='<td style="text-align:left;font-size:10px;white-space:nowrap">'+esc(w.date||"-")+'</td>';
+        o+='<td style="text-align:left;font-size:10px;cursor:pointer;color:var(--blu)" onclick="openDetail(\''+w.gn+'\')">'+esc(w._nm)+' <span class="d">#'+w.gn+'</span></td>';
+        o+='<td style="text-align:left;font-size:10px">'+esc(w.store||"-")+'</td>';
+        o+='<td style="text-align:left;font-size:10px">'+esc(w.city||"-")+'</td>';
+        o+='<td style="text-align:left;font-size:10px;color:var(--dim)">'+esc(w.zip||"-")+'</td>';
+        o+='<td style="text-align:left;font-size:10px;color:var(--blu)">'+(w.pn?fN(w.pn):"-")+'</td>';
+        o+='<td style="text-align:left;font-size:10px;color:var(--amb)">'+(w.tk||"-")+'</td>';
+        o+='<td style="text-align:left;font-size:9px;color:var(--dim);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.addr||"-")+'</td>';
+        o+='</tr>';
+      });
       o+='</tbody></table></div>';
     }
   }
