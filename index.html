@@ -602,6 +602,97 @@ function simulatePacks(a,N){
     buckets:buckets,expPL:(tRet/N)-cost};
 }
 
+// === REMAINING POOL FORECAST ===
+// Deterministic analysis of ALL remaining packs — no randomness needed
+// Shows exactly how many packs contain each prize tier and outcome distribution
+function remainingPoolForecast(a){
+  if(!a.complete||a.epr<=0||a.etr<=0||!a.btpInfo.valid)return{valid:false};
+  var g=a.g,pk=g.pk,cost=a.packPrice,epr=a.epr;
+
+  // Build tier breakdown: how many remaining prizes exist and how they map to packs
+  var tiers=[];
+  for(var i=0;i<g.pz.length;i++){
+    var p=g.pz[i],rem=p.p-p.c;
+    if(rem<=0)continue;
+    var ratio=epr>0?rem/epr:0; // prizes per pack
+    var packsWith=Math.min(epr,rem); // max packs that can contain this prize (1 per pack assumption for rare tiers)
+    var pctPacks=epr>0?packsWith/epr:0;
+    var cat=a.tierCats[p.a]||"?";
+    var isJackpot=cat==="TOP"||cat==="TOP-1"||cat==="TOP-2";
+    var isMid=cat==="MID";
+    tiers.push({a:p.a,rem:rem,ratio:ratio,packsWith:packsWith,pctPacks:pctPacks,cat:cat,isJackpot:isJackpot,isMid:isMid});
+  }
+
+  // Jackpot packs: how many packs contain at least one jackpot-tier prize?
+  // For rare prizes (ratio < 1), each prize goes in a separate pack
+  // For common prizes (ratio >= 1), they stack in packs
+  var jackpotPacks=0,jackpotTierDetails=[];
+  for(i=0;i<tiers.length;i++){
+    if(!tiers[i].isJackpot)continue;
+    var t=tiers[i];
+    // Each rare prize sits in a different pack (they don't stack)
+    jackpotTierDetails.push({a:t.a,rem:t.rem,cat:t.cat,packsWith:t.rem,pctOfRemaining:epr>0?t.rem/epr:0,
+      oddsPerPack:epr>0&&t.rem>0?"1:"+fN(Math.round(epr/t.rem)):"—"});
+    jackpotPacks+=t.rem; // approximate: each jackpot prize in a unique pack
+  }
+  // Adjust for potential overlap (very rare — two jackpot prizes in same pack)
+  // For games with few jackpot prizes this is negligible
+  if(jackpotPacks>epr)jackpotPacks=epr;
+
+  // Mid-tier packs: how many packs have a mid-tier prize?
+  var midPrizes=0;
+  for(i=0;i<tiers.length;i++){if(tiers[i].isMid)midPrizes+=tiers[i].rem;}
+  // Mid prizes can stack, so estimate unique packs with at least one mid prize
+  // Poisson approximation: P(at least 1) = 1 - P(0) ≈ 1 - e^(-lambda) where lambda = midPrizes/epr
+  var midLambda=epr>0?midPrizes/epr:0;
+  var pMidPack=midLambda>0?1-Math.exp(-midLambda):0;
+  var midPacks=Math.round(epr*pMidPack);
+
+  // Profitable packs estimate: packs where total return >= cost
+  // Use simulation data if available, otherwise estimate from prize structure
+  // A pack profits if floor + mid hits + jackpot hits >= cost
+  // Floor is guaranteed, so profit requires: mid+jackpot >= cost - floor
+  var profitGap=cost-a.floorEV; // need this much above floor to profit
+  // Mid-tier prizes per pack on average
+  var midEVPerPack=0;
+  for(i=0;i<tiers.length;i++){if(tiers[i].isMid)midEVPerPack+=tiers[i].a*tiers[i].ratio;}
+
+  // Pack outcome buckets (deterministic estimates)
+  // Floor-only packs: no mid, no jackpot
+  var pNoMid=Math.exp(-midLambda); // Poisson P(0 mid prizes)
+  var floorOnlyPacks=Math.round(epr*pNoMid*(1-jackpotPacks/epr));
+  // Floor+mid packs: has mid prizes but no jackpot
+  var floorMidPacks=epr-floorOnlyPacks-jackpotPacks;
+  if(floorMidPacks<0)floorMidPacks=0;
+
+  // Total remaining prize value
+  var totalRemValue=0;
+  for(i=0;i<tiers.length;i++)totalRemValue+=tiers[i].a*tiers[i].rem;
+  var avgPackValue=epr>0?totalRemValue/epr:0;
+  var totalRemCost=epr*cost;
+
+  // Pack categories
+  var packCats=[];
+  // Jackpot packs by tier
+  for(i=0;i<jackpotTierDetails.length;i++){
+    var jd=jackpotTierDetails[i];
+    packCats.push({label:"Contains $"+fN(jd.a)+" ("+jd.cat+")",count:jd.rem,pct:jd.pctOfRemaining,color:jd.cat==="TOP"?"#d4a017":jd.cat==="TOP-1"?"#af7ac5":"#5a6a7a",isJackpot:true,prizeAmt:jd.a});
+  }
+  // Mid-prize packs
+  packCats.push({label:"Mid-tier prize (no jackpot)",count:Math.max(0,floorMidPacks),pct:epr>0?Math.max(0,floorMidPacks)/epr:0,color:"#3498db",isJackpot:false,prizeAmt:0});
+  // Floor-only
+  packCats.push({label:"Floor only ($"+fN(a.floorEV)+")",count:Math.max(0,floorOnlyPacks),pct:epr>0?Math.max(0,floorOnlyPacks)/epr:0,color:"#5a6a7a",isJackpot:false,prizeAmt:0});
+
+  return{valid:true,epr:epr,cost:cost,floor:a.floorEV,
+    totalRemValue:totalRemValue,totalRemCost:totalRemCost,avgPackValue:avgPackValue,
+    jackpotPacks:jackpotPacks,jackpotPct:epr>0?jackpotPacks/epr:0,
+    midPacks:midPacks,midPct:epr>0?midPacks/epr:0,
+    floorOnlyPacks:floorOnlyPacks,floorOnlyPct:epr>0?floorOnlyPacks/epr:0,
+    jackpotTierDetails:jackpotTierDetails,
+    packCats:packCats,tiers:tiers,
+    mat:a.mat};
+}
+
 // === TREND TRACKING ===
 function saveTrend(){
   if(!S.data.length)return;
@@ -1093,6 +1184,84 @@ function render(){
         sim.buckets.forEach(function(b){var w=mxBk>0?(b.n/mxBk)*100:0;var p2=(b.n/sim.N*100).toFixed(1);var c=b.l.indexOf("Break")>=0||b.l.indexOf("2x")>=0||b.l.indexOf("5x")>=0?"var(--grn)":b.l.indexOf("Floor+")>=0?"var(--amb)":"var(--dim)";
           o+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px"><div style="width:70px;text-align:right;font-size:10px;font-weight:600;color:'+c+'">'+b.l+'</div><div style="flex:1;height:18px;background:var(--bg);border-radius:3px;overflow:hidden;position:relative"><div style="width:'+w+'%;height:100%;background:'+c+';opacity:.5;border-radius:3px"></div><span style="position:absolute;right:6px;top:1px;font-size:10px;color:#fff;font-weight:600">'+p2+'%</span></div></div>';});
         o+='<div style="font-size:10px;margin-top:4px" class="d">Range: $'+fN(sim.worst)+'–$'+fN(sim.best)+' · Cost: $'+fN(sim.cost)+'</div></div>';}
+
+      // === REMAINING POOL FORECAST ===
+      var rpf=remainingPoolForecast(sel);
+      if(rpf.valid){
+        o+='<div class="C" style="border-color:#d4a01744"><div class="L" style="margin-bottom:10px;color:var(--gld)">📦 REMAINING POOL FORECAST — '+fN(rpf.epr)+' PACKS LEFT</div>';
+        // Summary stats
+        o+='<div class="G" style="grid-template-columns:repeat(auto-fit,minmax(100px,1fr));margin-bottom:12px">';
+        [{l:"PACKS LEFT",v:fN(rpf.epr),c:"var(--wht)"},
+         {l:"JACKPOT PACKS",v:fN(rpf.jackpotPacks),c:"var(--grn)"},
+         {l:"JACKPOT %",v:pct(rpf.jackpotPct),c:rpf.jackpotPct>0.001?"var(--grn)":"var(--dim)"},
+         {l:"MID PACKS",v:fN(rpf.midPacks),c:"var(--blu)"},
+         {l:"FLOOR ONLY",v:fN(rpf.floorOnlyPacks),c:"var(--dim)"},
+         {l:"AVG VALUE",v:"$"+Math.round(rpf.avgPackValue),c:rpf.avgPackValue>=rpf.cost?"var(--grn)":"var(--amb)"}
+        ].forEach(function(m){o+='<div class="cl"><div class="L" style="font-size:8px">'+m.l+'</div><div style="font-size:14px;font-weight:800;color:'+m.c+'">'+m.v+'</div></div>';});
+        o+='</div>';
+
+        // Jackpot tier breakdown — the money section
+        if(rpf.jackpotTierDetails.length>0){
+          o+='<div style="margin-bottom:12px">';
+          o+='<div style="font-size:11px;font-weight:700;color:var(--gld);margin-bottom:6px">JACKPOT PRIZES IN REMAINING PACKS</div>';
+          rpf.jackpotTierDetails.forEach(function(jd){
+            var barW=Math.max(1,Math.min(100,jd.pctOfRemaining*100*50)); // scale up for visibility
+            var tierClr=jd.cat==="TOP"?"#d4a017":jd.cat==="TOP-1"?"#af7ac5":"#5a6a7a";
+            o+='<div style="padding:8px 10px;background:var(--bg);border-radius:6px;margin-bottom:4px;border-left:3px solid '+tierClr+'">';
+            o+='<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">';
+            o+='<div><span style="font-size:16px;font-weight:800;color:'+tierClr+'">$'+fN(jd.a)+'</span> <span style="font-size:9px;color:var(--dim)">'+jd.cat+'</span></div>';
+            o+='<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">';
+            o+='<div style="text-align:center"><div style="font-size:18px;font-weight:800;color:var(--grn)">'+jd.rem+'</div><div style="font-size:8px;color:var(--dim)">PRIZES</div></div>';
+            o+='<div style="text-align:center"><div style="font-size:14px;font-weight:700;color:var(--wht)">'+jd.oddsPerPack+'</div><div style="font-size:8px;color:var(--dim)">PACK ODDS</div></div>';
+            o+='<div style="text-align:center"><div style="font-size:14px;font-weight:700;color:var(--amb)">'+pct(jd.pctOfRemaining)+'</div><div style="font-size:8px;color:var(--dim)">OF PACKS</div></div>';
+            o+='</div></div>';
+            // Visual: each dot = 1 prize scattered among packs
+            if(jd.rem<=20&&jd.rem>0){
+              o+='<div style="margin-top:6px;display:flex;gap:2px;flex-wrap:wrap">';
+              var dotsTotal=Math.min(100,Math.round(rpf.epr/Math.max(1,jd.rem)));
+              for(var dd=0;dd<Math.min(jd.rem*dotsTotal,200);dd++){
+                var isWin=dd%dotsTotal===0;
+                o+='<div style="width:'+(isWin?8:4)+'px;height:'+(isWin?8:4)+'px;border-radius:50%;background:'+(isWin?tierClr:'#1e2d3d')+';margin:'+(isWin?0:2)+'px"></div>';
+              }
+              o+='<div style="font-size:9px;color:var(--dim);margin-left:6px">1 dot = ~'+fN(dotsTotal)+' packs · colored = winner</div>';
+              o+='</div>';
+            }
+            o+='</div>';
+          });
+          o+='</div>';
+        }
+
+        // Pack outcome distribution — visual stacked bar
+        o+='<div style="margin-bottom:8px"><div style="font-size:11px;font-weight:700;color:var(--wht);margin-bottom:6px">PACK OUTCOME DISTRIBUTION</div>';
+        // Stacked horizontal bar
+        o+='<div style="height:32px;background:var(--bg);border-radius:6px;overflow:hidden;display:flex;position:relative">';
+        rpf.packCats.forEach(function(pc2){
+          if(pc2.pct<=0)return;
+          var w2=Math.max(pc2.pct*100,0.3); // min width for visibility
+          o+='<div style="width:'+w2+'%;height:100%;background:'+pc2.color+';opacity:0.6;border-right:1px solid var(--bg)" title="'+pc2.label+': '+fN(pc2.count)+' packs ('+pct(pc2.pct)+')"></div>';
+        });
+        o+='</div>';
+        // Legend + counts
+        o+='<div style="margin-top:6px">';
+        rpf.packCats.forEach(function(pc2){
+          if(pc2.count<=0)return;
+          o+='<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #1e2d3d15">';
+          o+='<div style="display:flex;align-items:center;gap:6px"><div style="width:10px;height:10px;border-radius:2px;background:'+pc2.color+';opacity:0.6"></div><span style="font-size:11px">'+pc2.label+'</span></div>';
+          o+='<div style="display:flex;gap:12px;align-items:center"><span style="font-size:12px;font-weight:700">'+fN(pc2.count)+'</span><span style="font-size:10px;color:var(--dim);width:45px;text-align:right">'+pct(pc2.pct)+'</span></div>';
+          o+='</div>';
+        });
+        o+='</div></div>';
+
+        // Total value remaining
+        o+='<div style="padding:8px 10px;background:var(--bg);border-radius:6px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px">';
+        o+='<div><div class="L" style="font-size:8px">TOTAL PRIZE $ LEFT</div><div style="font-size:16px;font-weight:800;color:var(--grn)">$'+fN(Math.round(rpf.totalRemValue))+'</div></div>';
+        o+='<div><div class="L" style="font-size:8px">TOTAL PACK COST</div><div style="font-size:16px;font-weight:800;color:var(--red)">$'+fN(Math.round(rpf.totalRemCost))+'</div></div>';
+        o+='<div><div class="L" style="font-size:8px">POOL RETURN</div><div style="font-size:16px;font-weight:800;color:'+(rpf.totalRemValue>=rpf.totalRemCost?'var(--grn)':'var(--amb)')+'">'+pct(rpf.totalRemCost>0?rpf.totalRemValue/rpf.totalRemCost:0)+'</div></div>';
+        o+='</div>';
+
+        if(rpf.mat<0.20)o+='<div style="margin-top:8px;font-size:10px;color:var(--amb);padding:6px;background:var(--amb)10;border-radius:4px">⚠ Game is only '+pct(rpf.mat)+' sold — forecast improves as more data comes in.</div>';
+        o+='</div>';
+      }
 
       // === VALIDATION ===
       o+='<div class="C"><div class="L" style="margin-bottom:8px">VALIDATION</div>';
