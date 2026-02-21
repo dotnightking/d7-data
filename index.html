@@ -578,6 +578,9 @@ function predictJackpotPacks(g, a, model) {
   }
   if (!slots.length) return { valid: false, reason: 'No remaining jackpot prizes' };
   var n = slots.length;
+  // Issue 1 fix: if spread is too thin (>50,000 packs per prize), prediction is meaningless
+  var packsPerPrize = n > 0 && epr > 0 ? Math.round(epr / n) : 0;
+  var tooSparse = packsPerPrize > 50000;
   // Get cluster info
   var clusterInfo = null;
   if (model && model.valid) {
@@ -648,19 +651,25 @@ function predictJackpotPacks(g, a, model) {
     });
   }
   // Assign prize amounts to positions
+  // FIX 2: For tight-gap games prizes are UNIFORM — no ordering implied.
+  // For wide/moderate: highest prize → latest pack (rarest zone).
+  // For tight: just list prizes as "one of these" — no positional claim.
   slots.sort(function(x, y) { return y.prizeAmt - x.prizeAmt; });
-  var isWide = clusterInfo && (clusterInfo.gapBucket === 'wide' || clusterInfo.gapBucket === 'moderate');
+  var isTight = clusterInfo && clusterInfo.gapBucket === 'tight';
+  var isWide  = clusterInfo && (clusterInfo.gapBucket === 'wide' || clusterInfo.gapBucket === 'moderate');
   var results = [];
   for (var k = 0; k < n; k++) {
     var pred = predictions[k];
-    var slot = isWide ? slots[n-1-k] : slots[k];
+    // tight: don't assign highest prize to earliest — all positions are equal
+    var slot = isTight ? slots[k % slots.length] : (isWide ? slots[n-1-k] : slots[k]);
     var pctOfRun = ((pred.predictedPack / totalPacks) * 100).toFixed(1);
     var basis = clusterInfo
       ? clusterInfo.grp.sampleSize + ' historical winners - ' + clusterInfo.grp.key
       : 'uniform distribution (no cluster data)';
-    var confidence = clusterInfo
-      ? (clusterInfo.grp.sampleSize >= 100 ? 'HIGH' : clusterInfo.grp.sampleSize >= 30 ? 'MEDIUM' : 'LOW')
-      : 'LOW';
+    var confidence = tooSparse ? 'VERY LOW'
+      : clusterInfo
+        ? (clusterInfo.grp.sampleSize >= 100 ? 'HIGH' : clusterInfo.grp.sampleSize >= 30 ? 'MEDIUM' : 'LOW')
+        : 'LOW';
     results.push({
       prizeAmt:      slot.prizeAmt,
       predictedPack: pred.predictedPack,
@@ -671,7 +680,8 @@ function predictJackpotPacks(g, a, model) {
       basis:         basis,
       confidence:    confidence,
       clusterKey:    clusterInfo ? clusterInfo.grp.key : null,
-      gapBucket:     clusterInfo ? clusterInfo.gapBucket : 'unknown'
+      gapBucket:     clusterInfo ? clusterInfo.gapBucket : 'unknown',
+      prizeOrderFixed: isTight  // tight games: prize shown is representative, not positional
     });
   }
   results.sort(function(x, y) { return x.predictedPack - y.predictedPack; });
@@ -683,7 +693,9 @@ function predictJackpotPacks(g, a, model) {
     totalPacks:     totalPacks,
     soldPacks:      soldPacks,
     hasCluster:     !!clusterInfo,
-    clusterKey:     clusterInfo ? clusterInfo.grp.key : null
+    clusterKey:     clusterInfo ? clusterInfo.grp.key : null,
+    tooSparse:      tooSparse,
+    packsPerPrize:  packsPerPrize
   };
 }
 
@@ -1010,7 +1022,7 @@ function render(){
       o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div style="flex:1;min-width:0">';
       o+='<div style="font-size:15px;font-weight:700;color:var(--wht);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.g.nm)+' <span class="d" style="font-weight:400">#'+a.g.gn+'</span></div>';
       o+='<div style="font-size:11px;color:var(--dim)">$'+a.g.pr+(a.g.pk?' · '+a.g.pk+'/pk':'')+(a.aa?' · BTP:$'+fN(a.aa):'')+(a.g.guar?' · Fl:$'+fN(a.g.guar):'')+(_br?' · <span style="color:var(--amb)">🔥'+fN(_br.packsPerDay)+'/day</span>':'')+'</div></div>';
-      o+='<div style="font-size:10px;color:var(--dim);margin-top:1px">Packs: <strong>'+fN(a.pc)+'</strong> printed · <span style="color:'+(a.pc>0&&a.epr/a.pc<0.3?'var(--red)':a.pc>0&&a.epr/a.pc<0.6?'var(--amb)':'var(--grn)')+'"><strong>'+fN(a.epr)+'</strong></span> remaining'+(a.pc>0?' ('+((a.epr/a.pc)*100).toFixed(0)+'% left)':'')+'</div>';
+      if(a.pc>0)o+='<div style="font-size:10px;color:var(--dim);margin-top:1px">Packs: <strong>'+fN(a.pc)+'</strong> printed · <span style="color:'+(a.epr/a.pc<0.3?'var(--red)':a.epr/a.pc<0.6?'var(--amb)':'var(--grn)')+'><strong>'+fN(a.epr)+'</strong></span> remaining (' +((a.epr/a.pc)*100).toFixed(0)+'% left)</div>';
       var confClr=a.confidence>=85?"var(--grn)":a.confidence>=70?"var(--blu)":a.confidence>=50?"var(--dim)":a.confidence>=30?"var(--amb)":"var(--red)";
       o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+confClr+';font-size:26px">'+a.sc+'<span style="font-size:12px;font-weight:600"> pts</span></div>';
       o+='<div style="font-size:9px;color:var(--dim)">#'+a.rank+' of '+a.rankOf+'</div>';
@@ -1057,7 +1069,7 @@ function render(){
       o+='<div class="C"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><div>';
       o+='<div style="font-size:18px;font-weight:800;color:var(--wht)">'+esc(sel.g.nm)+' <span class="d" style="font-size:14px">#'+sel.g.gn+'</span></div>';
       o+='<div style="font-size:11px;color:var(--dim);margin-top:4px">$'+sel.g.pr+' · '+sel.g.pk+'/pack=$'+fN(sel.packPrice)+' · Floor:$'+fN(sel.g.guar||0)+' · Odds:1:'+sel.g.odds+'</div></div>';
-      o+='<div style="font-size:11px;color:var(--dim);margin-top:3px">📦 <strong style="color:var(--wht)">'+fN(sel.pc)+'</strong> packs printed · <strong style="color:'+(sel.pc>0&&sel.epr/sel.pc<0.3?'var(--red)':sel.pc>0&&sel.epr/sel.pc<0.6?'var(--amb)':'var(--grn)')+'">'+fN(sel.epr)+'</strong> remaining'+(sel.pc>0?' · '+((sel.epr/sel.pc)*100).toFixed(1)+'% left':'')+'</div>';
+      if(sel.pc>0)o+='<div style="font-size:11px;color:var(--dim);margin-top:3px">📦 <strong style="color:var(--wht)">'+fN(sel.pc)+'</strong> packs printed · <strong style="color:'+(sel.epr/sel.pc<0.3?'var(--red)':sel.epr/sel.pc<0.6?'var(--amb)':'var(--grn)')+'>">'+fN(sel.epr)+'</strong> remaining · '+((sel.epr/sel.pc)*100).toFixed(1)+'% left</div>';
       var selConfClr=sel.confidence>=85?"var(--grn)":sel.confidence>=70?"var(--blu)":sel.confidence>=50?"var(--dim)":sel.confidence>=30?"var(--amb)":"var(--red)";
       o+='<div style="text-align:right"><div class="V" style="color:'+selConfClr+'">'+sel.sc+'<span style="font-size:12px"> pts</span></div><div style="font-size:10px;color:var(--dim)">#'+sel.rank+' of '+sel.rankOf+'</div><div style="font-size:11px;font-weight:700;color:'+selConfClr+'">'+sel.confidence+'% '+sel.confLabel+'</div></div></div>';
       if(sel.whyScore.length){o+='<div style="margin-top:6px">';sel.whyScore.forEach(function(w){var c=w.p>0?"var(--grn)":w.p<0?"var(--red)":"var(--dim)";o+='<span class="why-tag" style="background:'+c+'15;color:'+c+';border:1px solid '+c+'30">'+(w.p>0?"▲+":"▼")+w.p+' '+w.f+'</span>';});o+='</div>';}
@@ -1226,6 +1238,8 @@ function render(){
         if(jpp.lastWinnerPack>0)o+=' (last claim: <strong style="color:var(--amb)">#'+fN(jpp.lastWinnerPack)+'</strong>)';
         o+=' · '+fN(jpp.totalPacks-jpp.startPack)+' packs in remaining run';
         o+=' · <span style="color:var(--amb)">⚠ Estimates only</span></div>';
+        if(jpp.tooSparse)o+='<div style="padding:6px 10px;background:var(--amb)18;border:1px solid var(--amb)30;border-radius:6px;font-size:10px;color:var(--amb);margin-bottom:8px">⚠ Very sparse: ~'+fN(jpp.packsPerPrize)+' packs per prize — positions are rough estimates only.</div>';
+        if(jpp.predictions.length&&jpp.predictions[0].gapBucket==='tight')o+='<div style="padding:6px 10px;background:#f39c1218;border:1px solid #f39c1230;border-radius:6px;font-size:10px;color:var(--amb);margin-bottom:8px">ℹ️ Flat prize structure (tight gap) — prizes distribute uniformly. Pack numbers show estimated zones, not prize-specific positions.</div>';
         o+='<div style="overflow-x:auto"><table style="font-size:11px">';
         o+='<thead><tr>';
         o+='<th style="text-align:left;padding:5px 8px;color:var(--dim);font-size:9px">PRIZE AMT</th>';
