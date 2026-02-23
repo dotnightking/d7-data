@@ -438,7 +438,8 @@ function buildWinnerModel(winData,gameData){
     if(!recs||!recs.length||!g.tot||!g.pk||!g.pr)return;
     var totalPacks=Math.round(g.tot/g.pk);if(totalPacks<=0)return;
     var pz=g.pz?g.pz.slice().sort(function(a,b){return b.a-a.a}):[];if(!pz.length)return;
-    var topAmt=pz[0].a,top1Amt=pz.length>1?pz[1].a:0,top2Amt=pz.length>2?pz[2].a:0;
+    var topAmt=pz[0].a;if(topAmt<=1000)return;// skip low-value jackpots — different distribution
+    var top1Amt=pz.length>1?pz[1].a:0,top2Amt=pz.length>2?pz[2].a:0;
     // Detect BTP threshold
     var btpAmt=0;
     for(var i=pz.length-1;i>=0;i--){if(pz[i].p/totalPacks>=0.3&&pz[i].a>btpAmt)btpAmt=pz[i].a;}
@@ -452,7 +453,7 @@ function buildWinnerModel(winData,gameData){
     var gapBucket=jkGapRatio<1.5?'tight':jkGapRatio<4?'moderate':'wide';
     var key=priceTier+'_'+jkBucket+'_'+gapBucket;
     if(!groups[key])groups[key]={key:key,priceTier:priceTier,jkBucket:jkBucket,gapBucket:gapBucket,
-      games:[],positions:[],jkGapRatios:[],topAmts:[],jkCounts:[],jk1to2Ratios:[]};
+      games:[],positions:[],gapRatios:[],gapCVs:[],jkGapRatios:[],topAmts:[],jkCounts:[],jk1to2Ratios:[]};
     var grp=groups[key];
     grp.games.push(gn);grp.jkGapRatios.push(jkGapRatio);
     grp.topAmts.push(topAmt);grp.jkCounts.push(jkCount);grp.jk1to2Ratios.push(jk1to2Ratio);
@@ -461,6 +462,14 @@ function buildWinnerModel(winData,gameData){
       var pos=(r.pn/totalPacks)*100;if(pos<0||pos>110)return;
       grp.positions.push({pos:Math.min(pos,100),pn:r.pn,gn:gn,totalPacks:totalPacks});
     });
+    // Compute gaps for this game (normalized as fraction of total packs)
+    var sortedPn=recs.map(function(r){return r.pn}).filter(function(p){return p>0}).sort(function(a,b){return a-b});
+    if(sortedPn.length>=2){
+      for(var gi=0;gi<sortedPn.length-1;gi++){
+        grp.gapRatios.push((sortedPn[gi+1]-sortedPn[gi])/totalPacks);
+      }
+      grp.gapCVs.push({gn:gn,gaps:sortedPn.length-1,firstPn:sortedPn[0],lastPn:sortedPn[sortedPn.length-1],totalPacks:totalPacks});
+    }
   });
   Object.keys(groups).forEach(function(key){
     var grp=groups[key];
@@ -480,6 +489,16 @@ function buildWinnerModel(winData,gameData){
                           grp.gapBucket==='moderate'?Math.max(grp.p10,12):Math.max(grp.p10,8);
     grp.recommendedMaxPct=Math.min(grp.p75,85);
     grp.sampleSize=n;grp.gameCount=grp.games.length;
+    // Gap statistics from real winner data
+    if(grp.gapRatios.length>=2){
+      var gr=grp.gapRatios.slice().sort(function(a,b){return a-b;}),gn2=gr.length;
+      grp.gapMean=gr.reduce(function(s,v){return s+v;},0)/gn2;
+      var gVar=gr.reduce(function(s,v){return s+Math.pow(v-grp.gapMean,2);},0)/gn2;
+      grp.gapStd=Math.sqrt(gVar);grp.gapCV=grp.gapMean>0?grp.gapStd/grp.gapMean:0;
+      grp.gapP25=gr[Math.floor(gn2*0.25)];grp.gapP50=gr[Math.floor(gn2*0.50)];
+      grp.gapP75=gr[Math.floor(gn2*0.75)];grp.gapP90=gr[Math.floor(gn2*0.90)];
+      grp.gapCount=gn2;
+    }
   });
   return{valid:true,groups:groups};
 }
@@ -577,6 +596,26 @@ function predictJackpotPacks(g,a,model){
   var lastWinnerPack=0;
   if(S.winData){var wd=S.winData[String(g.gn)];if(wd&&wd.length)lastWinnerPack=Math.max.apply(null,wd.map(function(r){return r.pn||0;}));}
   var startPack=Math.max(soldPacks,lastWinnerPack);
+  // Winner model lookup — same grouping logic as getPackGuidance
+  var winGrp=null,winBasis='';
+  if(S.winModel&&S.winModel.valid){
+    var pz2=g.pz?g.pz.slice().sort(function(ax,b){return b.a-ax.a;}):[];
+    var topAmt2=pz2.length?pz2[0].a:0,top1Amt2=pz2.length>1?pz2[1].a:0;
+    var btpAmt2=0;for(var bi=pz2.length-1;bi>=0;bi--){if(pz2[bi].p/totalPacks>=0.3&&pz2[bi].a>btpAmt2)btpAmt2=pz2[bi].a;}
+    var jkCount2=0;for(var bj=0;bj<pz2.length;bj++){if(pz2[bj].a>btpAmt2)jkCount2++;}
+    var jkGapRatio2=top1Amt2>0?topAmt2/top1Amt2:99;
+    var pt2=g.pr<=5?'low':g.pr<=20?'mid':g.pr<=50?'high':'premium';
+    var jb2=jkCount2<=1?'single':jkCount2<=3?'few':jkCount2<=8?'multi':'mega';
+    var gb2=jkGapRatio2<1.5?'tight':jkGapRatio2<4?'moderate':'wide';
+    var wkey=pt2+'_'+jb2+'_'+gb2;
+    winGrp=S.winModel.groups[wkey];
+    if(!winGrp||!winGrp.valid||!winGrp.gapCount){
+      var f1=Object.keys(S.winModel.groups).filter(function(k){return k.indexOf(pt2+'_'+jb2)===0&&S.winModel.groups[k].valid&&S.winModel.groups[k].gapCount>0;});
+      if(f1.length)winGrp=S.winModel.groups[f1[0]];
+    }
+    if(winGrp&&winGrp.gapCount>0)winBasis='Empirical gaps ('+winGrp.gapCount+' from '+winGrp.gameCount+' games, CV='+winGrp.gapCV.toFixed(2)+')';
+    else winGrp=null;
+  }
   // Per-tier analysis
   var predictions=[];
   for(var ti=0;ti<predTiers.length;ti++){
@@ -604,12 +643,26 @@ function predictJackpotPacks(g,a,model){
     var expectedGap=K>0?Math.round(N/K):N;
     var adjGap=densityShift>0.01?Math.round(expectedGap/densityShift):expectedGap;
     var bestPack=startPack+adjGap;
+    var rangeLow=Math.min(startPack+p25,totalPacks),rangeHigh=Math.min(startPack+p75,totalPacks);
+    var basis='Hypergeometric + density';
+    // Override with empirical gap data if winner model has data (TOP tier only)
+    if(winGrp&&role==='TOP'){
+      var empGapPacks50=Math.round(winGrp.gapP50*totalPacks);
+      var empGapPacks25=Math.round(winGrp.gapP25*totalPacks);
+      var empGapPacks75=Math.round(winGrp.gapP75*totalPacks);
+      bestPack=startPack+empGapPacks50;
+      rangeLow=startPack+empGapPacks25;
+      rangeHigh=startPack+empGapPacks75;
+      basis=winBasis;
+    }
     bestPack=Math.min(bestPack,totalPacks);bestPack=Math.max(bestPack,startPack+1);
+    rangeLow=Math.max(rangeLow,startPack+1);rangeLow=Math.min(rangeLow,totalPacks);
+    rangeHigh=Math.max(rangeHigh,rangeLow);rangeHigh=Math.min(rangeHigh,totalPacks);
     predictions.push({
       prizeAmt:t.a,role:role,rem:K,printed:t.printed||K,
       bestPack:bestPack,
-      rangeLow:Math.min(startPack+p25,totalPacks),
-      rangeHigh:Math.min(startPack+p75,totalPacks),
+      rangeLow:rangeLow,
+      rangeHigh:rangeHigh,
       p25:p25,p50:p50,p75:p75,
       expectedGap:expectedGap,
       densityShift:densityShift,signal:signal,signalClr:signalClr,
@@ -617,7 +670,8 @@ function predictJackpotPacks(g,a,model){
       pPerPack:pPerPack,packsFor50:p50,
       claimDelay:estimateClaimDelay(t.a),
       pctOfRun:totalPacks>0?((bestPack/totalPacks)*100).toFixed(1):'0',
-      confidence:K>=5?'HIGH':K>=2?'MEDIUM':'LOW'
+      confidence:winGrp&&role==='TOP'?(winGrp.gapCount>=10?'HIGH':'MEDIUM'):(K>=5?'HIGH':K>=2?'MEDIUM':'LOW'),
+      basis:basis
     });
   }
   // Mid-tier density: any prize >=2x ticket but not in predTiers
@@ -637,7 +691,8 @@ function predictJackpotPacks(g,a,model){
     evPerPack:evPerPack,midShift:midShift,midHits:midHits,
     prizeClass:a.prizeClass||'unknown',
     jackpotDensityShift:a.jackpotDensityShift||0,
-    note:'Hypergeometric model with density adjustment.'};
+    note:winGrp?winBasis:'Hypergeometric model with density adjustment.',
+    winnerModel:!!winGrp,winnerGames:winGrp?winGrp.gameCount:0,winnerGaps:winGrp?winGrp.gapCount:0};
 }
 
 
@@ -724,49 +779,6 @@ function burnRateProjection(id,a){
 // ============================================================
 // v7.4: PRIZE CLASS + SIMILARITY + VARIANCE MODEL
 // ============================================================
-function classifyPrizeClass(g){if(!g||!g.pz||!g.pz.length)return'unknown';var pz=g.pz.slice().sort(function(a,b){return b.a-a.a});return pz[0].a>1000?'high':'low';}
-
-function computeSimilarity(gA,gB){
-  if(!gA||!gB||!gA.pz||!gB.pz)return 0;
-  var pzA=gA.pz.slice().sort(function(a,b){return b.a-a.a});var pzB=gB.pz.slice().sort(function(a,b){return b.a-a.a});
-  var pcA=gA.tot>0&&gA.pk>0?Math.round(gA.tot/gA.pk):0;var pcB=gB.tot>0&&gB.pk>0?Math.round(gB.tot/gB.pk):0;
-  if(!pcA||!pcB)return 0;
-  var priceRatio=Math.min(gA.pr,gB.pr)/Math.max(gA.pr,gB.pr);
-  var packRatio=Math.min(pcA,pcB)/Math.max(pcA,pcB);
-  var topA=pzA[0].a,topB=pzB[0].a;var topRatio=Math.min(topA,topB)/Math.max(topA,topB);
-  var btpA=0,btpB=0;for(var i=pzA.length-1;i>=0;i--){if(pzA[i].p/pcA>=0.3&&pzA[i].a>btpA)btpA=pzA[i].a;}for(var j=pzB.length-1;j>=0;j--){if(pzB[j].p/pcB>=0.3&&pzB[j].a>btpB)btpB=pzB[j].a;}
-  var jkA=0,jkB=0;for(i=0;i<pzA.length;i++){if(pzA[i].a>btpA)jkA++;}for(j=0;j<pzB.length;j++){if(pzB[j].a>btpB)jkB++;}
-  var jkSim=jkA>0&&jkB>0?1-Math.abs(jkA-jkB)/Math.max(jkA,jkB):0;
-  var tierSim=1-Math.abs(pzA.length-pzB.length)/Math.max(pzA.length,pzB.length);
-  var topDensA=pcA>0?pzA[0].p/pcA:0;var topDensB=pcB>0?pzB[0].p/pcB:0;
-  var densSim=(topDensA>0&&topDensB>0)?Math.min(topDensA,topDensB)/Math.max(topDensA,topDensB):0;
-  return priceRatio*0.20+packRatio*0.15+topRatio*0.20+jkSim*0.15+tierSim*0.10+densSim*0.20;
-}
-
-function findSimilarGames(targetGame,allGames,winData,K){
-  K=K||5;if(!targetGame||!allGames||!winData)return[];
-  var targetClass=classifyPrizeClass(targetGame);var candidates=[];
-  for(var i=0;i<allGames.length;i++){var g=allGames[i];if(String(g.gn)===String(targetGame.gn))continue;if(classifyPrizeClass(g)!==targetClass)continue;var gn=String(g.gn);var recs=winData[gn];if(!recs||recs.length<3)continue;var sim=computeSimilarity(targetGame,g);if(sim<0.3)continue;candidates.push({game:g,gn:gn,similarity:sim,winnerCount:recs.length});}
-  candidates.sort(function(a,b){return b.similarity-a.similarity});return candidates.slice(0,K);
-}
-
-function buildVarianceModel(similarGames,winData){
-  if(!similarGames||!similarGames.length||!winData)return{valid:false,reason:'No similar games'};
-  var allNormGaps=[],gameStats=[];
-  for(var i=0;i<similarGames.length;i++){var sg=similarGames[i];var recs=winData[sg.gn];if(!recs||recs.length<3)continue;var g=sg.game;var totalPacks=g.tot>0&&g.pk>0?Math.round(g.tot/g.pk):0;if(totalPacks<=0)continue;
-    var pns=[];for(var j=0;j<recs.length;j++){if(recs[j].pn&&recs[j].pn>0)pns.push(recs[j].pn);}pns.sort(function(a,b){return a-b});if(pns.length<3)continue;
-    var gaps=[];for(j=0;j<pns.length-1;j++){var gap=pns[j+1]-pns[j];gaps.push(gap);allNormGaps.push(gap/totalPacks);}
-    var avgGap=gaps.reduce(function(s,v){return s+v},0)/gaps.length;var variance=0;for(j=0;j<gaps.length;j++)variance+=Math.pow(gaps[j]-avgGap,2);var stddev=gaps.length>1?Math.sqrt(variance/(gaps.length-1)):0;var cv=avgGap>0?stddev/avgGap:0;
-    gameStats.push({gn:sg.gn,similarity:sg.similarity,gaps:gaps.length,avgGap:avgGap,stddev:stddev,cv:cv,totalPacks:totalPacks,winnerCount:pns.length});}
-  if(!allNormGaps.length)return{valid:false,reason:'No gap data'};
-  allNormGaps.sort(function(a,b){return a-b});var n=allNormGaps.length;
-  var totalWeight=0,weightedCV=0;for(i=0;i<gameStats.length;i++){var w=similarGames[i]?similarGames[i].similarity:0.5;weightedCV+=gameStats[i].cv*w;totalWeight+=w;}
-  var avgCV=totalWeight>0?weightedCV/totalWeight:0.5;
-  var sampleScore=Math.min(1,n/30);var simScore=similarGames.length>0?similarGames.reduce(function(s,g2){return s+g2.similarity},0)/similarGames.length:0;var cvConsistency=1-Math.min(1,avgCV);
-  var confidenceScore=Math.round((sampleScore*0.4+simScore*0.3+cvConsistency*0.3)*100);
-  var bandMultiplier=avgCV<0.3?0.25:avgCV<0.5?0.35:avgCV<0.8?0.45:0.55;
-  return{valid:true,gamesUsed:gameStats.length,totalGaps:n,avgCV:avgCV,bandMultiplier:bandMultiplier,confidenceScore:confidenceScore,confLabel:confidenceScore>=75?'HIGH':confidenceScore>=50?'MODERATE':confidenceScore>=30?'LOW':'MINIMAL',gameStats:gameStats,p10:allNormGaps[Math.floor(n*0.10)]||0,p25:allNormGaps[Math.floor(n*0.25)]||0,p50:allNormGaps[Math.floor(n*0.50)]||0,p75:allNormGaps[Math.floor(n*0.75)]||0,p90:allNormGaps[Math.floor(n*0.90)]||0};
-}
 
 var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pack",
   winModel:{valid:false},
@@ -955,7 +967,7 @@ function buildGamePrompt(a){
   if(a.flags.length>0){L.push("\n--- ACTIVE FLAGS ---");a.flags.forEach(function(f){L.push("["+f.t+"] "+f.m);});}
   // v7.4: Similarity model info
   var jpp=predictJackpotPacks(g,a,null);
-  if(jpp.valid){L.push("\n--- PREDICTION MODEL: "+jpp.model.toUpperCase()+" ---");L.push("Prize class: "+jpp.prizeClass+" | Similar games: "+jpp.similarGames);if(jpp.varianceModel&&jpp.varianceModel.valid)L.push("Variance: CV="+jpp.varianceModel.avgCV.toFixed(2)+" | Band: \u00b1"+Math.round(jpp.varianceModel.bandMultiplier*100)+"% | Conf: "+jpp.varianceModel.confidenceScore+"%");L.push(jpp.note);}
+  if(jpp.valid){L.push("\n--- PREDICTION ---");L.push("Prize class: "+jpp.prizeClass);L.push(jpp.note);}
   L.push("\n--- QUESTIONS ---");
   L.push("1. Should I buy a pack of this game? Give a clear YES/NO/MAYBE with confidence level and reasoning.");
   L.push("2. Is the TOP prize genuinely more concentrated in remaining packs? Is the claim lag real or noise?");
@@ -1330,6 +1342,7 @@ function render(){try{
           o+='<div style="flex:1;padding:4px 6px;background:var(--card);border-radius:4px;text-align:center"><div class="d">50% chance</div><div style="font-weight:700">'+fN(p.p50)+' packs</div></div>';
           o+='<div style="flex:1;padding:4px 6px;background:var(--card);border-radius:4px;text-align:center"><div class="d">75% chance</div><div style="font-weight:700">'+fN(p.p75)+' packs</div></div>';
           o+='</div>';
+          o+='<div style="margin-top:4px;font-size:8px;color:var(--dim)">'+esc(p.basis)+' · Conf: <span style="font-weight:700;color:'+(p.confidence==='HIGH'?'var(--grn)':p.confidence==='MEDIUM'?'var(--amb)':'var(--red)')+'">'+p.confidence+'</span></div>';
           o+='</div>';
         });
         // Timeline visualization
@@ -1349,7 +1362,7 @@ function render(){try{
         o+='<span><span style="color:var(--amb)">|</span> Sold ('+soldPct3.toFixed(0)+'%)</span>';
         jpp.predictions.forEach(function(p){var c=p.role==="TOP"?"#d4a017":p.role==="TOP-1"?"#af7ac5":"#5a9bd5";o+='<span><span style="color:'+c+'">■</span> $'+fN(p.prizeAmt)+'</span>';});
         o+='</div></div>';
-        o+='<div style="font-size:8px;color:var(--dim);margin-top:6px">⚠ Estimates only — based on hypergeometric probability + density shifts</div>';
+        o+='<div style="font-size:8px;color:var(--dim);margin-top:6px">⚠ Estimates only — '+(jpp.winnerModel?'<span style="color:var(--grn)">'+esc(jpp.note)+'</span>':'based on hypergeometric probability + density shifts')+'</div>';
       }
       o+='</div>';
 
