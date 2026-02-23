@@ -57,7 +57,7 @@ var GD=[];var DD="";
 
 // === UTILITIES ===
 function fmt(n){if(n>=1e6)return"$"+(n/1e6).toFixed(1)+"M";if(n>=1e3)return"$"+(n/1e3).toFixed(1)+"K";return"$"+Math.round(n)}
-function pct(n){return(n*100).toFixed(1)+"%"}
+function pct(n){return n>0&&n<0.001?"1:"+fN(Math.round(1/n)):(n*100).toFixed(1)+"%"}
 function fmtO(n){if(n===Infinity||n>1e9)return"-";if(n>=1e6)return"1:"+Math.round(n/1e6)+"M";if(n>=1e3)return"1:"+Math.round(n/1e3)+"K";return"1:"+Math.round(n)}
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
 function fN(n){return Number(n).toLocaleString()}
@@ -564,51 +564,83 @@ function getPackGuidance(g,a,model){
 function predictJackpotPacks(g,a,model){
   if(!a.pc||a.pc<=0)return{valid:false,reason:'No pack count'};
   var totalPacks=a.pc,soldPacks=Math.round((a.mat||0)*totalPacks),epr=a.epr||0;
-  var slots=[];
-  if(a.jackpotTiers&&a.jackpotTiers.length){
-    a.jackpotTiers.slice().sort(function(x,y){return y.a-x.a}).forEach(function(t){
-      for(var i=0;i<t.rem;i++)slots.push({prizeAmt:t.a,role:t===a.jackpotTiers[0]?'TOP':'TOP-1'});
+  if(!a.jackpotTiers||!a.jackpotTiers.length)return{valid:false,reason:'No jackpot tiers'};
+  var minJackpot=Math.max(g.pr*10,500);
+  var predTiers=a.jackpotTiers.filter(function(t){return t.a>=minJackpot&&t.rem>0;});
+  if(!predTiers.length)return{valid:false,reason:'No remaining jackpot prizes'};
+  predTiers.sort(function(x,y){return y.a-x.a});
+  if(predTiers.length>3)predTiers=predTiers.slice(0,3);
+  var roles=["TOP","TOP-1","TOP-2"];
+  // Build shift lookup from jackpotShifts (which has actual density data)
+  var shiftMap={};
+  if(a.jackpotShifts)a.jackpotShifts.forEach(function(js){shiftMap[js.a]=js;});
+  var lastWinnerPack=0;
+  if(S.winData){var wd=S.winData[String(g.gn)];if(wd&&wd.length)lastWinnerPack=Math.max.apply(null,wd.map(function(r){return r.pn||0;}));}
+  var startPack=Math.max(soldPacks,lastWinnerPack);
+  // Per-tier analysis
+  var predictions=[];
+  for(var ti=0;ti<predTiers.length;ti++){
+    var t=predTiers[ti],role=roles[ti]||"TOP-"+ti;
+    var K=t.rem,N=epr>0?epr:1;
+    var pPerPack=N>0?1-Math.exp(logC(N-K,1)-logC(N,1)):0;
+    // Hypergeometric: packs needed for 25/50/75% probability
+    var p25=N,p50=N,p75=N;
+    var step=Math.max(1,Math.floor(N/5000));// skip for large N
+    for(var x=step;x<=N;x+=step){
+      var pHit=1-Math.exp(logC(N-K,Math.min(x,N))-logC(N,Math.min(x,N)));
+      if(pHit>=0.25&&p25===N)p25=x;
+      if(pHit>=0.50&&p50===N)p50=x;
+      if(pHit>=0.75&&p75===N){p75=x;break;}
+    }
+    // Get shift from jackpotShifts
+    var jsData=shiftMap[t.a];
+    var densityShift=jsData?jsData.shift:1;
+    var signal=jsData?jsData.signal:(densityShift>=1.3?'STRONG':densityShift>=1.0?'GOOD':densityShift>=0.7?'WEAK':'DEPLETED');
+    var claimLag=jsData?jsData.claimLag:0;
+    var launchOdds=jsData?jsData.launchOdds:0;
+    var currentOdds=jsData?jsData.currentOdds:0;
+    var signalClr=signal==='STRONG'||signal==='GOOD'?'var(--grn)':signal==='NEUTRAL'?'var(--dim)':'var(--red)';
+    // Expected gap & best pack
+    var expectedGap=K>0?Math.round(N/K):N;
+    var adjGap=densityShift>0.01?Math.round(expectedGap/densityShift):expectedGap;
+    var bestPack=startPack+adjGap;
+    bestPack=Math.min(bestPack,totalPacks);bestPack=Math.max(bestPack,startPack+1);
+    predictions.push({
+      prizeAmt:t.a,role:role,rem:K,printed:t.printed||K,
+      bestPack:bestPack,
+      rangeLow:Math.min(startPack+p25,totalPacks),
+      rangeHigh:Math.min(startPack+p75,totalPacks),
+      p25:p25,p50:p50,p75:p75,
+      expectedGap:expectedGap,
+      densityShift:densityShift,signal:signal,signalClr:signalClr,
+      claimLag:claimLag,launchOdds:launchOdds,currentOdds:currentOdds,
+      pPerPack:pPerPack,packsFor50:p50,
+      claimDelay:estimateClaimDelay(t.a),
+      pctOfRun:totalPacks>0?((bestPack/totalPacks)*100).toFixed(1):'0',
+      confidence:K>=5?'HIGH':K>=2?'MEDIUM':'LOW'
     });
   }
-  if(!slots.length)return{valid:false,reason:'No remaining jackpot prizes'};
-  var n=slots.length,packsPerPrize=epr>0?Math.round(epr/n):0,tooSparse=packsPerPrize>50000;
-  var startPack=soldPacks,lastWinnerPack=0;
-  if(S.winData){var wd=S.winData[String(g.gn)];if(wd&&wd.length)lastWinnerPack=Math.max.apply(null,wd.map(function(r){return r.pn||0;}));}
-  if(lastWinnerPack>startPack)startPack=lastWinnerPack;
-  var runLength=Math.max(1,totalPacks-startPack),segSize=Math.max(1,Math.round(runLength/(n+1)));
-  // v7.4: Similarity-based variance model
-  var prizeClass=classifyPrizeClass(g);var simGames=[];var varianceModel={valid:false};
-  if(prizeClass==='high'&&S.winData&&GD.length>0){simGames=findSimilarGames(g,GD,S.winData,7);if(simGames.length>=2){varianceModel=buildVarianceModel(simGames,S.winData);}}
-  var predictions=[];
-  for(var s=0;s<n;s++){
-    var basePack=startPack+segSize*(s+1);
-    if(s>0&&basePack<=predictions[s-1].predictedPack)basePack=predictions[s-1].predictedPack+Math.max(1,Math.round(segSize*0.5));
-    basePack=Math.min(basePack,totalPacks-(n-s));basePack=Math.max(basePack,startPack+1);
-    var margin;
-    if(varianceModel.valid){margin=Math.max(Math.round(epr*0.03),Math.round(segSize*varianceModel.bandMultiplier));}
-    else{margin=Math.max(Math.round(epr*0.05),Math.round(segSize*0.35));}
-    var cd=estimateClaimDelay(slots[s].prizeAmt);
-    predictions.push({predictedPack:basePack,rangeLow:Math.max(startPack+1,basePack-margin),rangeHigh:Math.min(totalPacks,basePack+margin),marginPacks:margin,prizeAmt:slots[s].prizeAmt,role:slots[s].role,claimDelay:cd,
-      pctOfRun:totalPacks>0?((basePack/totalPacks)*100).toFixed(1):'0',
-      confidence:varianceModel.valid?(varianceModel.confidenceScore>=75?'HIGH':varianceModel.confidenceScore>=50?'MEDIUM':'LOW'):'LOW',
-      gapBucket:varianceModel.valid?'similarity':'uniform',
-      basis:varianceModel.valid?'Similarity model ('+simGames.length+' games, CV='+varianceModel.avgCV.toFixed(2)+')':'Uniform spacing'});
-  }
-  var tierProbs=[];
-  if(a.jackpotTiers)a.jackpotTiers.forEach(function(jt){
-    if(jt.rem<=0)return;var N=epr,K=jt.rem;
-    var pPack=N>0?1-Math.exp(logC(N-K,1)-logC(N,1)):0;
-    var lo2=1,hi2=N,p50packs=N;while(lo2<=hi2){var mid3=(lo2+hi2)>>1;var ph=1-Math.exp(logC(N-K,mid3)-logC(N,mid3));if(ph>=0.5){p50packs=mid3;hi2=mid3-1;}else lo2=mid3+1;}
-    tierProbs.push({a:jt.a,role:jt.role||'',rem:jt.remaining,pPerPack:pPack,packsFor50:p50packs,claimDelay:estimateClaimDelay(jt.a)});
+  // Mid-tier density: any prize >=2x ticket but not in predTiers
+  var midHits=0,midTotal=0;
+  if(a.g.pz)a.g.pz.forEach(function(tr){
+    if(tr.a>=g.pr*2&&tr.a<minJackpot){midHits+=tr.p-tr.c;midTotal+=tr.p;}
   });
-  predictions.sort(function(x,y){return x.predictedPack-y.predictedPack});
-  return{valid:true,predictions:predictions,tierProbs:tierProbs,lastWinnerPack:lastWinnerPack,
-    startPack:startPack,totalPacks:totalPacks,soldPacks:soldPacks,tooSparse:tooSparse,packsPerPrize:packsPerPrize,
-    prizeClass:prizeClass,model:varianceModel.valid?'similarity':'uniform',similarGames:simGames.length,varianceModel:varianceModel,
-    confidenceScore:varianceModel.valid?varianceModel.confidenceScore:0,confLabel:varianceModel.valid?varianceModel.confLabel:'UNIFORM',
-    note:varianceModel.valid?'Variance from '+varianceModel.gamesUsed+' similar games ('+varianceModel.totalGaps+' gaps, avg CV='+varianceModel.avgCV.toFixed(2)+').':
-      (prizeClass==='low'?'Low-value game (top \u2264$1K) \u2014 winner data not used for prediction.':'Uniform distribution (no similar game matches).')};
+  var midDensityNow=epr>0?midHits/epr:0;
+  var midDensityLaunch=totalPacks>0?midTotal/totalPacks:0;
+  var midShift=midDensityLaunch>0?midDensityNow/midDensityLaunch:1;
+  // Overall EV per remaining pack (all tiers)
+  var totalRemValue=0;
+  if(a.g.pz)a.g.pz.forEach(function(tr){totalRemValue+=(tr.p-tr.c)*tr.a;});
+  var evPerPack=epr>0?totalRemValue/epr:0;
+  return{valid:true,predictions:predictions,lastWinnerPack:lastWinnerPack,
+    startPack:startPack,totalPacks:totalPacks,soldPacks:soldPacks,epr:epr,
+    evPerPack:evPerPack,midShift:midShift,midHits:midHits,
+    prizeClass:a.prizeClass||'unknown',
+    jackpotDensityShift:a.jackpotDensityShift||0,
+    note:'Hypergeometric model with density adjustment.'};
 }
+
+
 
 function sparkline(data,field,h){
   if(!data||data.length<2)return"";h=h||20;
@@ -1258,79 +1290,72 @@ function render(){try{
 
 
       // === v7.2: JACKPOT PREDICTIONS CARD ===
-      var jpp=predictJackpotPacks(sel.g,sel,S.winModel&&S.winModel.valid?S.winModel:null);
+      var jpp=predictJackpotPacks(sel.g,sel,null);
       o+='<div class="C" style="border-color:#9b59b644">';
-      o+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
-      o+='<div class="L" style="color:var(--pur);margin-bottom:0">🔮 JACKPOT PACK PREDICTIONS</div>';
-      if(jpp.valid&&jpp.hasCluster)o+='<div style="font-size:9px;color:var(--dim)">'+esc(jpp.clusterKey||'')+'</div>';
-      o+='</div>';
+      o+='<div class="L" style="color:var(--pur);margin-bottom:8px">🔮 PACK PREDICTIONS</div>';
       if(!jpp.valid){
         o+='<div style="font-size:11px;color:var(--dim)">'+esc(jpp.reason||'No remaining jackpot prizes.')+'</div>';
       }else{
-        o+='<div style="padding:6px 10px;background:var(--bg);border-radius:6px;font-size:10px;color:var(--dim);margin-bottom:10px">';
-        o+='Starting after pack <strong style="color:var(--wht)">#'+fN(jpp.startPack)+'</strong>';
-        if(jpp.lastWinnerPack>0)o+=' (last claim: <strong style="color:var(--amb)">#'+fN(jpp.lastWinnerPack)+'</strong>)';
-        o+=' · '+fN(jpp.totalPacks-jpp.startPack)+' packs in remaining run';
-        o+=' · <span style="color:var(--amb)">⚠ Estimates only</span></div>';
-        // v7.4: Similarity model info
-        o+='<div style="padding:6px 10px;background:var(--bg);border-radius:6px;font-size:10px;margin-bottom:8px">';
-        o+='<span style="font-weight:700;color:'+(jpp.model==='similarity'?'var(--grn)':'var(--dim)')+'">MODEL: '+jpp.model.toUpperCase()+'</span>';
-        if(jpp.model==='similarity'){o+=' · <span class="g">'+jpp.similarGames+' similar games</span> · Conf: <span style="font-weight:700;color:'+(jpp.confidenceScore>=75?'var(--grn)':jpp.confidenceScore>=50?'var(--blu)':'var(--amb)')+'">'+jpp.confidenceScore+'% '+jpp.confLabel+'</span>';
-          if(jpp.varianceModel&&jpp.varianceModel.valid)o+='<br>CV='+jpp.varianceModel.avgCV.toFixed(2)+' · Band: ±'+Math.round(jpp.varianceModel.bandMultiplier*100)+'% · '+jpp.varianceModel.totalGaps+' gaps from '+jpp.varianceModel.gamesUsed+' games';}
-        else{o+=' · <span class="d">'+esc(jpp.note)+'</span>';}
+        // Summary bar
+        o+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">';
+        [{l:"Packs Sold",v:fN(jpp.soldPacks)+"/"+fN(jpp.totalPacks)+" ("+Math.round(jpp.soldPacks/jpp.totalPacks*100)+"%)"},{l:"Remaining",v:fN(jpp.epr)},{l:"EV/Pack",v:"$"+jpp.evPerPack.toFixed(0),c:jpp.evPerPack>=sel.g.pr?"var(--grn)":"var(--red)"},{l:"Mid-Tier Shift",v:jpp.midShift.toFixed(2)+"x",c:jpp.midShift>=1.1?"var(--grn)":jpp.midShift>=0.9?"var(--dim)":"var(--red)"}].forEach(function(e){o+='<div class="cl"><div class="L" style="font-size:8px">'+e.l+'</div><div style="font-size:12px;font-weight:700;color:'+(e.c||"var(--wht)")+'">'+(e.v||"—")+'</div></div>';});
         o+='</div>';
-        if(jpp.tooSparse)o+='<div style="padding:6px 10px;background:var(--amb)18;border:1px solid var(--amb)30;border-radius:6px;font-size:10px;color:var(--amb);margin-bottom:8px">⚠ Very sparse: ~'+fN(jpp.packsPerPrize)+' packs per prize — positions are rough estimates only.</div>';
-        if(jpp.predictions.length&&jpp.predictions[0].gapBucket==='tight')o+='<div style="padding:6px 10px;background:#f39c1218;border:1px solid #f39c1230;border-radius:6px;font-size:10px;color:var(--amb);margin-bottom:8px">ℹ️ Flat prize structure (tight gap) — prizes distribute uniformly. Pack numbers show estimated zones, not prize-specific positions.</div>';
-        o+='<div style="overflow-x:auto"><table style="font-size:11px">';
-        o+='<thead><tr>';
-        o+='<th style="text-align:left;padding:5px 8px;color:var(--dim);font-size:9px">PRIZE AMT</th>';
-        o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">TIER</th>';
-        o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">PREDICTED PACK #</th>';
-        o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">RANGE (LOW → HIGH)</th>';
-        o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">% OF RUN</th>';
-        o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">CONFIDENCE</th>';
-        o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">GAP TYPE</th>';
-        o+='</tr></thead><tbody>';
-        jpp.predictions.forEach(function(p,idx){
-          var confClr2=p.confidence==='HIGH'?'var(--grn)':p.confidence==='MEDIUM'?'var(--amb)':'var(--red)';
-          var gapClr=p.gapBucket==='tight'?'var(--amb)':p.gapBucket==='moderate'?'var(--grn)':'var(--pur)';
-          var isTop=idx===jpp.predictions.length-1&&p.gapBucket!=='tight';
-          o+='<tr style="border-bottom:1px solid #1e2d3d40">';
-          o+='<td style="text-align:left;padding:5px 8px;font-weight:800;color:'+(isTop?'var(--gld)':'var(--wht)')+'">$'+fN(p.prizeAmt)+'</td>';
-          o+='<td style="padding:5px 8px;font-size:9px;font-weight:700;color:'+(p.role==='TOP'?'#d4a017':'#af7ac5')+'">'+p.role+'</td>';
-          o+='<td style="padding:5px 8px;font-weight:800;color:var(--grn)">#'+fN(p.predictedPack)+'</td>';
-          o+='<td style="padding:5px 8px;color:var(--dim)">#'+fN(p.rangeLow)+' → #'+fN(p.rangeHigh)+'</td>';
-          o+='<td style="padding:5px 8px;color:var(--blu)">'+p.pctOfRun+'%</td>';
-          o+='<td style="padding:5px 8px;font-weight:700;color:'+confClr2+'">'+p.confidence+'</td>';
-          o+='<td style="padding:5px 8px;font-weight:700;color:'+gapClr+'">'+p.gapBucket.toUpperCase()+'</td>';
-          o+='</tr>';
+        if(jpp.lastWinnerPack>0)o+='<div style="font-size:10px;color:var(--amb);margin-bottom:8px">Last known winner at pack #'+fN(jpp.lastWinnerPack)+'</div>';
+        // Per-tier prediction cards
+        jpp.predictions.forEach(function(p){
+          var tierClr=p.role==="TOP"?"#d4a017":p.role==="TOP-1"?"#af7ac5":"#5a9bd5";
+          var sigClr=p.signal==="STRONG"||p.signal==="GOOD"?"var(--grn)":p.signal==="NEUTRAL"?"var(--dim)":"var(--red)";
+          var oddsStr=p.pPerPack<0.001?"1:"+fN(Math.round(1/p.pPerPack)):(p.pPerPack*100).toFixed(2)+"%";
+          o+='<div style="margin-bottom:8px;padding:10px;background:var(--bg);border-radius:8px;border-left:3px solid '+tierClr+'">';
+          // Header: prize amount + signal
+          o+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">';
+          o+='<div><span style="font-size:16px;font-weight:800;color:'+tierClr+'">$'+fN(p.prizeAmt)+'</span> <span style="font-size:10px;color:var(--dim)">('+p.role+')</span></div>';
+          o+='<div style="padding:3px 8px;border-radius:4px;font-size:10px;font-weight:700;background:'+sigClr+'18;color:'+sigClr+'">'+p.signal+' '+p.densityShift.toFixed(2)+'x</div>';
+          o+='</div>';
+          // Key stats row
+          o+='<div style="display:flex;gap:12px;flex-wrap:wrap;font-size:10px;margin-bottom:8px">';
+          o+='<span><span class="d">Remaining:</span> <b>'+p.rem+'/'+p.printed+'</b></span>';
+          o+='<span><span class="d">Odds/pack:</span> <b>'+oddsStr+'</b></span>';
+          o+='<span><span class="d">Was:</span> 1:'+fN(p.launchOdds)+' <span class="d">→ Now:</span> 1:'+fN(p.currentOdds)+'</span>';
+          o+='</div>';
+          // Target pack
+          o+='<div style="padding:8px;background:#9b59b610;border-radius:6px;margin-bottom:6px">';
+          o+='<div style="font-size:10px;color:var(--dim);margin-bottom:2px">TARGET PACK RANGE</div>';
+          o+='<div style="font-size:18px;font-weight:800;color:var(--grn)">#'+fN(p.rangeLow)+' — #'+fN(p.rangeHigh)+'</div>';
+          o+='<div style="font-size:10px;color:var(--dim)">Best estimate: <b style="color:var(--wht)">#'+fN(p.bestPack)+'</b> ('+p.pctOfRun+'% into run)</div>';
+          o+='</div>';
+          // Probability breakdown
+          o+='<div style="display:flex;gap:6px;font-size:9px">';
+          o+='<div style="flex:1;padding:4px 6px;background:var(--card);border-radius:4px;text-align:center"><div class="d">25% chance</div><div style="font-weight:700">'+fN(p.p25)+' packs</div></div>';
+          o+='<div style="flex:1;padding:4px 6px;background:var(--card);border-radius:4px;text-align:center"><div class="d">50% chance</div><div style="font-weight:700">'+fN(p.p50)+' packs</div></div>';
+          o+='<div style="flex:1;padding:4px 6px;background:var(--card);border-radius:4px;text-align:center"><div class="d">75% chance</div><div style="font-weight:700">'+fN(p.p75)+' packs</div></div>';
+          o+='</div>';
+          o+='</div>';
         });
-        o+='</tbody></table></div>';
+        // Timeline visualization
         var soldPct3=(sel.mat||0)*100;
-        o+='<div style="margin-top:10px"><div style="font-size:9px;font-weight:700;color:var(--dim);margin-bottom:4px">PACK TIMELINE (% of print run)</div>';
-        o+='<div style="position:relative;height:30px;background:var(--bg);border-radius:6px;overflow:hidden">';
+        o+='<div style="margin-top:6px"><div style="font-size:9px;font-weight:700;color:var(--dim);margin-bottom:4px">PACK TIMELINE</div>';
+        o+='<div style="position:relative;height:36px;background:var(--bg);border-radius:6px;overflow:hidden">';
         o+='<div style="position:absolute;left:0;top:0;width:'+soldPct3+'%;height:100%;background:#ffffff08"></div>';
         jpp.predictions.forEach(function(p,idx){
-          var lp=(p.rangeLow/jpp.totalPacks)*100;
-          var hp=(p.rangeHigh/jpp.totalPacks)*100;
-          var cp=(p.predictedPack/jpp.totalPacks)*100;
-          var pc2=idx===jpp.predictions.length-1&&p.gapBucket!=='tight'?'#d4a017':'#9b59b6';
-          o+='<div style="position:absolute;left:'+lp+'%;top:9px;width:'+(hp-lp)+'%;height:12px;background:'+pc2+'22;border:1px solid '+pc2+'55;border-radius:2px"></div>';
-          o+='<div style="position:absolute;left:'+cp+'%;top:3px;width:2px;height:24px;background:'+pc2+';transform:translateX(-50%)"></div>';
+          var tierClr2=p.role==="TOP"?"#d4a017":p.role==="TOP-1"?"#af7ac5":"#5a9bd5";
+          var lp=(p.rangeLow/jpp.totalPacks)*100,hp=(p.rangeHigh/jpp.totalPacks)*100,cp=(p.bestPack/jpp.totalPacks)*100;
+          o+='<div style="position:absolute;left:'+lp+'%;top:'+(8+idx*8)+'px;width:'+(hp-lp)+'%;height:8px;background:'+tierClr2+'33;border:1px solid '+tierClr2+'66;border-radius:2px" title="$'+fN(p.prizeAmt)+'"></div>';
+          o+='<div style="position:absolute;left:'+cp+'%;top:'+(6+idx*8)+'px;width:2px;height:12px;background:'+tierClr2+'" title="Best: #'+fN(p.bestPack)+'"></div>';
         });
         o+='<div style="position:absolute;left:'+soldPct3+'%;top:0;width:2px;height:100%;background:var(--amb)"></div>';
         o+='</div>';
-        o+='<div style="display:flex;gap:12px;margin-top:4px;font-size:9px;color:var(--dim)">';
-        o+='<span><span style="color:var(--amb)">|</span> Sold ('+soldPct3.toFixed(1)+'%)</span>';
-        o+='<span><span style="color:var(--pur)">|</span> Predicted</span>';
-        o+='<span><span style="color:var(--gld)">|</span> Top prize (wide gap)</span>';
-        o+='<span style="color:var(--amb)">Estimates only</span></div></div>';
-        if(jpp.predictions.length>0)o+='<div style="font-size:9px;color:var(--dim);margin-top:6px">Basis: '+esc(jpp.predictions[0].basis)+'</div>';
+        o+='<div style="display:flex;gap:10px;margin-top:4px;font-size:9px;color:var(--dim);flex-wrap:wrap">';
+        o+='<span><span style="color:var(--amb)">|</span> Sold ('+soldPct3.toFixed(0)+'%)</span>';
+        jpp.predictions.forEach(function(p){var c=p.role==="TOP"?"#d4a017":p.role==="TOP-1"?"#af7ac5":"#5a9bd5";o+='<span><span style="color:'+c+'">■</span> $'+fN(p.prizeAmt)+'</span>';});
+        o+='</div></div>';
+        o+='<div style="font-size:8px;color:var(--dim);margin-top:6px">⚠ Estimates only — based on hypergeometric probability + density shifts</div>';
       }
       o+='</div>';
 
       // VALIDATION
       o+='<div class="C"><div class="L" style="margin-bottom:8px">VALIDATION</div>';
+
       if(sel.oddsCheck.valid===false&&sel.g.odds>0)o+='<div style="padding:6px 10px;background:var(--amb)18;border-radius:6px;font-size:11px;color:var(--amb);margin-bottom:8px">⚠ Prize counts imply odds of 1:'+Math.round(sel.oddsCheck.computedOdds)+', published 1:'+sel.g.odds+' ('+pct(sel.oddsCheck.diff)+" diff)</div>";
       if(sel.yieldValid)o+='<div style="padding:6px 10px;background:var(--grn1);border-radius:6px;font-size:11px;color:var(--grn);margin-bottom:8px">✓ Implied yield '+pct(sel.impliedYield)+' within expected range.</div>';
       else if(sel.complete)o+='<div style="padding:6px 10px;background:var(--amb)18;border-radius:6px;font-size:11px;color:var(--amb);margin-bottom:8px">⚠ Implied yield '+pct(sel.impliedYield)+' outside expected range.</div>';
