@@ -243,7 +243,7 @@ function analyze(g){
   addPts(mkMap[gSig]||0,"Markov "+gSig.replace(/_/g," "));
   if(returnGap!==0)addPts(Math.max(-5,Math.min(5,Math.round(returnGap*50))),"Return gap "+(returnGap>0?"+":"")+pct(returnGap));
   if(g.odds>0&&winOdds<Infinity)addPts(Math.max(-3,Math.min(3,Math.round(((g.odds-winOdds)/g.odds)*15))),"Win odds shift");
-  var trend=getTrend(g.id);
+  var trend=getTrend((g.id||String(g.gn)));
   if(trend.length>=3){var recent=trend.slice(-3),firstJd=recent[0].jd,lastJd=recent[recent.length-1].jd;if(firstJd>0){var trendDir=(lastJd-firstJd)/firstJd;addPts(Math.max(-5,Math.min(5,Math.round(trendDir*30))),"Trend "+(trendDir>0?"▲":"▼")+" "+pct(Math.abs(trendDir)));}}
   if(g.cs&&tpr>0)addPts(8,"CLOSING + top left");else if(g.cs&&tpr===0)addPts(-10,"CLOSING + gone");
   if(hollowedOut)addPts(-10,"HOLLOWED");
@@ -384,7 +384,7 @@ function saveTrend(){
   var d=new Date().toISOString().slice(0,10);
   var t=JSON.parse(localStorage.getItem("txt7")||"{}");
   S.data.forEach(function(a){
-    if(!a.complete)return;var k=a.g.id;if(!t[k])t[k]=[];
+    if(!a.complete)return;var k=(a.g.id||String(a.g.gn));if(!t[k])t[k]=[];
     if(t[k].length>0&&t[k][t[k].length-1].d===d)return;
     t[k].push({d:d,sc:a.sc,jd:a.jackpotDensityShift,jr:a.jackpotTiers.reduce(function(s,x){return s+x.rem},0),mat:a.mat,tpr:a.tpr});
     if(t[k].length>60)t[k]=t[k].slice(-60);
@@ -588,7 +588,11 @@ function predictJackpotPacks(g,a,model){
     if(varianceModel.valid){margin=Math.max(Math.round(epr*0.03),Math.round(segSize*varianceModel.bandMultiplier));}
     else{margin=Math.max(Math.round(epr*0.05),Math.round(segSize*0.35));}
     var cd=estimateClaimDelay(slots[s].prizeAmt);
-    predictions.push({predictedPack:basePack,rangeLow:Math.max(startPack+1,basePack-margin),rangeHigh:Math.min(totalPacks,basePack+margin),marginPacks:margin,prizeAmt:slots[s].prizeAmt,role:slots[s].role,claimDelay:cd});
+    predictions.push({predictedPack:basePack,rangeLow:Math.max(startPack+1,basePack-margin),rangeHigh:Math.min(totalPacks,basePack+margin),marginPacks:margin,prizeAmt:slots[s].prizeAmt,role:slots[s].role,claimDelay:cd,
+      pctOfRun:totalPacks>0?((basePack/totalPacks)*100).toFixed(1):'0',
+      confidence:varianceModel.valid?(varianceModel.confidenceScore>=75?'HIGH':varianceModel.confidenceScore>=50?'MEDIUM':'LOW'):'LOW',
+      gapBucket:varianceModel.valid?'similarity':'uniform',
+      basis:varianceModel.valid?'Similarity model ('+simGames.length+' games, CV='+varianceModel.avgCV.toFixed(2)+')':'Uniform spacing'});
   }
   var tierProbs=[];
   if(a.jackpotTiers)a.jackpotTiers.forEach(function(jt){
@@ -765,7 +769,7 @@ function applyStatScoring(data){
 function init(){
   try{
     var c=localStorage.getItem("txr_gd7");
-    if(c){GD=JSON.parse(c);if(GD.length){S.data=GD.map(function(g){return analyze(g)});applyStatScoring(S.data);}}
+    if(c){GD=JSON.parse(c);GD.forEach(function(g){if(!g.id)g.id=String(g.gn);});if(GD.length){S.data=GD.map(function(g){return analyze(g)});applyStatScoring(S.data);}}
     var wd=localStorage.getItem("txwd7");
     if(wd){S.winData=JSON.parse(wd);S.winModel=buildWinnerModel(S.winData,GD);}
   }catch(e){}
@@ -793,7 +797,7 @@ async function refreshAllData(){
     var json=await resp.json();
     if(json&&json.games&&json.games.length>0){
       GD=[];
-      json.games.forEach(function(ng){if(!ng.pz||!ng.pz.length||!ng.pr||ng.pr<=0)return;ng.id=String(ng.gn);ng.pz.sort(function(a,b){return b.a-a.b});GD.push(ng);});
+      json.games.forEach(function(ng){if(!ng.pz||!ng.pz.length||!ng.pr||ng.pr<=0)return;ng.id=String(ng.gn);ng.pz.sort(function(a,b){return b.a-a.a});GD.push(ng);});
       S.data=GD.map(function(g){return analyze(g)});applyStatScoring(S.data);
       if(S.winData)S.winModel=buildWinnerModel(S.winData,GD);
       DD=json.updated||"";localStorage.setItem("txr_date7",DD);localStorage.setItem("txr_gd7",JSON.stringify(GD));
@@ -819,7 +823,7 @@ function resetPack(){S.pack.log=[];S.pack.won=0;S.pack.spent=0;S.pack.af=false;r
 function saveSession(){if(!S.pack.log.length)return;S.sessions.push({g:S.pack.nm,s:S.pack.spent,w:S.pack.won,t:S.pack.log.length,d:new Date().toLocaleDateString(),af:S.pack.af});localStorage.setItem("txs7",JSON.stringify(S.sessions));resetPack()}
 function clearSess(){S.sessions=[];localStorage.setItem("txs7","[]");render()}
 function setBR(v){S.bankroll=v;localStorage.setItem("txb7",String(v));render()}
-function startPack(id){var a;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;S.pack={log:[],won:0,spent:0,af:false,pr:a.g.pr,pk:a.g.pk,nm:a.g.nm+' #'+a.g.gn,aa:a.aa,ew:Math.round(a.g.pk/a.g.odds)};S.tab="more";S.moreTab="pack";render()}
+function startPack(id){var a;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id||String(S.data[i].g.gn)===String(id)){a=S.data[i];break}if(!a)return;S.pack={log:[],won:0,spent:0,af:false,pr:a.g.pr,pk:a.g.pk,nm:a.g.nm+' #'+a.g.gn,aa:a.aa,ew:Math.round(a.g.pk/a.g.odds)};S.tab="more";S.moreTab="pack";render()}
 function mkv(){var pk=S.pack,rem=pk.pk-pk.log.length;if(rem<=0)return null;var wf=0;for(var i=0;i<pk.log.length;i++)if(pk.log[i].w)wf++;var wl=Math.max(0,pk.ew-wf),pA=pk.af?0:1/rem;var dec="EARLY",rsn="Pack early.";if(pk.af){dec="STOP";rsn="Anchor found.";}else if(pA>=0.15){dec="BUY";rsn=(pA*100).toFixed(1)+"% anchor chance.";}else if(pA>=0.05){dec="CONSIDER";}return{rem:rem,wl:wl,pW:wl/rem,pA:pA,dec:dec,rsn:rsn}}
 
 // === AI PROMPTS ===
@@ -994,13 +998,13 @@ function buildAllPrompt(){
   L.push("5. For each price point ($2/$3/$5/$10/$20/$30/$50/$100), which single game is the best buy?");
   return L.join("\n");
 }
-function copyAIPrompt(id){var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;navigator.clipboard.writeText(buildGamePrompt(a)).then(function(){S._promptMsg="✓ Copied!";render();setTimeout(function(){S._promptMsg=null;render()},2500)})}
-function showAIPrompt(id){var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id){a=S.data[i];break}if(!a)return;S._promptPreview=buildGamePrompt(a);render()}
+function copyAIPrompt(id){var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id||String(S.data[i].g.gn)===String(id)){a=S.data[i];break}if(!a)return;navigator.clipboard.writeText(buildGamePrompt(a)).then(function(){S._promptMsg="✓ Copied!";render();setTimeout(function(){S._promptMsg=null;render()},2500)})}
+function showAIPrompt(id){var a=null;for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===id||String(S.data[i].g.gn)===String(id)){a=S.data[i];break}if(!a)return;S._promptPreview=buildGamePrompt(a);render()}
 function copyAllPrompt(){navigator.clipboard.writeText(buildAllPrompt()).then(function(){S._promptMsg="✓ Copied!";render();setTimeout(function(){S._promptMsg=null;render()},2500)})}
 function showAllPrompt(){S._allPromptPreview=buildAllPrompt();render()}
 
 // === RENDER ===
-function render(){
+function render(){try{
   var pr={};GD.forEach(function(g){pr[g.pr]=1});var pArr=Object.keys(pr).map(Number).sort(function(a,b){return a-b});
   var f=S.data.slice();
   if(S.filterPr!=="all")f=f.filter(function(a){return a.g.pr===Number(S.filterPr)});
@@ -1014,9 +1018,9 @@ function render(){
     else if(iF==="depleted")f=f.filter(function(a){return a.tpr===0&&a.btpInfo.hasJackpot});}
   var sorts={score:function(a,b){return b.sc-a.sc},density:function(a,b){return b.jackpotDensityShift-a.jackpotDensityShift},gap:function(a,b){return b.returnGap-a.returnGap},topOdds:function(a,b){return a.tpo-b.tpo},tickets:function(a,b){return a.mat-b.mat},hyper:function(a,b){return b.hyperRatio-a.hyperRatio},jackpotEV:function(a,b){return b.jackpotEV-a.jackpotEV}};
   f.sort(sorts[S.sortBy]||sorts.score);
-  var sel=null;if(S.selId)for(var i=0;i<S.data.length;i++)if(S.data[i].g.id===S.selId){sel=S.data[i];break;}
+  var sel=null;if(S.selId){for(var i=0;i<S.data.length;i++){if(S.data[i].g.id===S.selId||String(S.data[i].g.gn)===String(S.selId)){sel=S.data[i];break;}}}
 
-  var o='<div class="H"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><h1>TX ENGINE <span style="color:var(--gld)">v7.1</span></h1>';
+  var o='<div class="H"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><h1>TX ENGINE <span style="color:var(--gld)">v7.4</span></h1>';
   o+='<div class="sub">'+GD.length+' games · Similarity + Variance Model · Jackpot Focused'+(DD?' · '+esc(DD):'')+'</div></div>';
   o+='<div class="B'+(S._refreshing?"":" on")+'" onclick="refreshAllData()">'+(S._refreshing?'⏳':'↻ REFRESH')+'</div></div>';
   if(S._refreshMsg)o+='<div style="font-size:10px;color:var(--blu);margin-top:4px">'+esc(S._refreshMsg)+'</div>';
@@ -1039,9 +1043,9 @@ function render(){
     [["score","Score"],["density","JK Density"],["hyper","JK P(pack)"],["jackpotEV","JK EV"],["gap","Gap"],["topOdds","Top Odds"],["tickets","Fresh"]].forEach(function(s){o+='<div class="B'+(S.sortBy===s[0]?" bn":"")+'" onclick="setSort(\''+s[0]+'\')" style="padding:5px 10px">'+s[1]+'</div>';});
     o+='</div>';
     for(var idx=0;idx<f.length;idx++){
-      var a=f[idx],tr2=getTrend(a.g.id);
-      var _br=computeBurnRate(a.g.id,a); // v7.1
-      o+='<div class="C ck" onclick="openDetail(\''+a.g.id+'\')">';
+      var a=f[idx],tr2=getTrend((a.g.id||String(a.g.gn)));
+      var _br=computeBurnRate((a.g.id||String(a.g.gn)),a); // v7.1
+      o+='<div class="C ck" onclick="openDetail(\''+(a.g.id||String(a.g.gn))+'\')">';
       if(idx===0&&f.length>1)o+='<div class="badge" style="right:12px;background:var(--grn);color:var(--bg)">TOP PICK</div>';
       if(a.g.cs)o+='<div class="badge" style="right:'+(idx===0&&f.length>1?'95px':'12px')+';background:var(--red);color:#fff">CLOSING</div>';
       if(!a.btpInfo.hasJackpot)o+='<div class="badge" style="left:12px;background:var(--dim);color:var(--bg)">NO JK</div>';
@@ -1050,6 +1054,7 @@ function render(){
       o+='<div style="font-size:15px;font-weight:700;color:var(--wht);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.g.nm)+' <span class="d" style="font-weight:400">#'+a.g.gn+'</span></div>';
       o+='<div style="font-size:11px;color:var(--dim)">$'+a.g.pr+(a.g.pk?' · '+a.g.pk+'/pk':'')+(a.aa?' · BTP:$'+fN(a.aa):'')+(a.g.guar?' · Fl:$'+fN(a.g.guar):'')+(_br?' · <span style="color:var(--amb)">🔥'+fN(_br.packsPerDay)+'/day</span>':'')+'</div></div>';
       if(a.pc>0)o+='<div style="font-size:10px;color:var(--dim)">'+fN(a.pc)+' packs ('+fN(a.eps)+' sold / '+fN(a.epr)+' left) '+(a.totalTickets>0?' | '+fN(a.totalTickets)+' tickets ('+fN(a.ets)+' sold / '+fN(a.etr)+' out)':'')+'</div>';
+      var _wc=S.winData&&S.winData[String(a.g.gn)]?S.winData[String(a.g.gn)]:null;if(_wc&&_wc.length>0){var _lwp=Math.max.apply(null,_wc.map(function(r){return r.pn||0}));o+='<div style="font-size:10px;color:var(--dim)">Winners: '+_wc.length+' claims'+(_lwp>0?' | Last: pack #'+fN(_lwp):'')+'</div>';}
       var confClr=a.confidence>=85?"var(--grn)":a.confidence>=70?"var(--blu)":a.confidence>=50?"var(--dim)":a.confidence>=30?"var(--amb)":"var(--red)";
       o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+confClr+';font-size:26px">'+a.sc+'<span style="font-size:12px;font-weight:600"> pts</span></div>';
       o+='<div style="font-size:9px;color:var(--dim)">#'+a.rank+' of '+a.rankOf+'</div>';
@@ -1088,7 +1093,7 @@ function render(){
     var sq=S.detailSearch.toLowerCase().trim();
     if(sq)detailList=detailList.filter(function(a){return a.g.nm.toLowerCase().indexOf(sq)>=0||String(a.g.gn).indexOf(sq)>=0});
     o+='<select class="I" onchange="setSel(this.value)"><option value="">— '+(sq?detailList.length+' matching':'Select game')+' —</option>';
-    detailList.forEach(function(a){var confClr2=a.confidence>=70?"🟢":a.confidence>=50?"🟡":"🔴";o+='<option value="'+a.g.id+'"'+(S.selId===a.g.id?" selected":"")+'>'+confClr2+' $'+a.g.pr+' | '+esc(a.g.nm)+' #'+a.g.gn+' | '+a.sc+'pts #'+a.rank+' | '+a.confidence+'% '+a.confLabel+'</option>';});
+    detailList.forEach(function(a){var _gid=a.g.id||String(a.g.gn);var confClr2=a.confidence>=70?"🟢":a.confidence>=50?"🟡":"🔴";o+='<option value="'+_gid+'"'+(_gid===S.selId?" selected":"")+'>'+confClr2+' $'+a.g.pr+' | '+esc(a.g.nm)+' #'+a.g.gn+' | '+a.sc+'pts #'+a.rank+' | '+a.confidence+'% '+a.confLabel+'</option>';});
     o+='</select></div>';
 
     if(sel){
@@ -1098,6 +1103,7 @@ function render(){
       o+='<div style="font-size:11px;color:var(--dim);margin-top:4px">$'+sel.g.pr+' · '+sel.g.pk+'/pack=$'+fN(sel.packPrice)+' · Floor:$'+fN(sel.g.guar||0)+' · Odds:1:'+sel.g.odds+'</div></div>';
       if(sel.pc>0)o+='<div style="font-size:11px;color:var(--dim);margin-top:3px">📦 <strong style="color:var(--wht)">'+fN(sel.pc)+'</strong> packs printed · <strong style="color:'+(sel.epr/sel.pc<0.3?'var(--red)':sel.epr/sel.pc<0.6?'var(--amb)':'var(--grn)')+'>">'+fN(sel.epr)+'</strong> remaining · '+((sel.epr/sel.pc)*100).toFixed(1)+'% left</div>';
       if(sel.totalTickets>0)o+='<div style="font-size:10px;color:var(--dim);margin-top:2px">Tickets: '+fN(sel.totalTickets)+' total / '+fN(sel.ets)+' sold / '+fN(sel.etr)+' outstanding'+(sel.prizeClass?' <span style="font-weight:700;color:'+(sel.prizeClass==="high"?"#d4a017":"#5a6a7a")+'">'+sel.prizeClass.toUpperCase()+' VALUE</span>':'')+'</div>';
+      var _dw=S.winData&&S.winData[String(sel.g.gn)]?S.winData[String(sel.g.gn)]:null;if(_dw&&_dw.length>0){var _dlw=Math.max.apply(null,_dw.map(function(r){return r.pn||0}));var _drc=_dw.slice().sort(function(a,b){return(b.pn||0)-(a.pn||0)});o+='<div style="font-size:10px;color:var(--dim);margin-top:2px">Winners: '+_dw.length+' claims'+(_dlw>0?' | Last winner: pack #'+fN(_dlw)+' | Recent: '+_drc.slice(0,3).map(function(r){return'#'+(r.pn>0?fN(r.pn):'?')+' '+esc(r.city||'')}).join(', '):'')+'</div>';}
       var selConfClr=sel.confidence>=85?"var(--grn)":sel.confidence>=70?"var(--blu)":sel.confidence>=50?"var(--dim)":sel.confidence>=30?"var(--amb)":"var(--red)";
       o+='<div style="text-align:right"><div class="V" style="color:'+selConfClr+'">'+sel.sc+'<span style="font-size:12px"> pts</span></div><div style="font-size:10px;color:var(--dim)">#'+sel.rank+' of '+sel.rankOf+'</div><div style="font-size:11px;font-weight:700;color:'+selConfClr+'">'+sel.confidence+'% '+sel.confLabel+'</div></div></div>';
       if(sel.whyScore.length){o+='<div style="margin-top:6px">';sel.whyScore.forEach(function(w){var c=w.p>0?"var(--grn)":w.p<0?"var(--red)":"var(--dim)";o+='<span class="why-tag" style="background:'+c+'15;color:'+c+';border:1px solid '+c+'30">'+(w.p>0?"▲+":"▼")+w.p+' '+w.f+'</span>';});o+='</div>';}
@@ -1148,7 +1154,7 @@ function render(){
       o+='<div style="font-size:10px;margin-top:4px" class="d"><span class="g">■</span> Floor <span class="b">■</span> Mid <span class="p">■</span> JK</div></div>';
 
       // === v7.1: BURN RATE CARD ===
-      var burn=computeBurnRate(sel.g.id,sel);
+      var burn=computeBurnRate((sel.g.id||String(sel.g.gn)),sel);
       if(burn){
         o+='<div class="C" style="border-color:#f39c1244"><div class="L" style="margin-bottom:10px;color:var(--amb)">🔥 BURN RATE</div>';
         o+='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">';
@@ -1278,6 +1284,7 @@ function render(){
         o+='<div style="overflow-x:auto"><table style="font-size:11px">';
         o+='<thead><tr>';
         o+='<th style="text-align:left;padding:5px 8px;color:var(--dim);font-size:9px">PRIZE AMT</th>';
+        o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">TIER</th>';
         o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">PREDICTED PACK #</th>';
         o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">RANGE (LOW → HIGH)</th>';
         o+='<th style="padding:5px 8px;color:var(--dim);font-size:9px">% OF RUN</th>';
@@ -1290,6 +1297,7 @@ function render(){
           var isTop=idx===jpp.predictions.length-1&&p.gapBucket!=='tight';
           o+='<tr style="border-bottom:1px solid #1e2d3d40">';
           o+='<td style="text-align:left;padding:5px 8px;font-weight:800;color:'+(isTop?'var(--gld)':'var(--wht)')+'">$'+fN(p.prizeAmt)+'</td>';
+          o+='<td style="padding:5px 8px;font-size:9px;font-weight:700;color:'+(p.role==='TOP'?'#d4a017':'#af7ac5')+'">'+p.role+'</td>';
           o+='<td style="padding:5px 8px;font-weight:800;color:var(--grn)">#'+fN(p.predictedPack)+'</td>';
           o+='<td style="padding:5px 8px;color:var(--dim)">#'+fN(p.rangeLow)+' → #'+fN(p.rangeHigh)+'</td>';
           o+='<td style="padding:5px 8px;color:var(--blu)">'+p.pctOfRun+'%</td>';
@@ -1389,9 +1397,9 @@ function render(){
       }
       o+='<div class="C"><div class="L" style="margin-bottom:8px">AI ANALYSIS</div>';
       o+='<div style="display:flex;gap:8px;flex-wrap:wrap">';
-      o+='<div class="B bn" onclick="copyAIPrompt(\''+sel.g.id+'\')">📋 Copy Game Prompt</div>';
-      o+='<div class="B pn" onclick="showAIPrompt(\''+sel.g.id+'\')">👁 Preview</div>';
-      o+='<div class="B on" onclick="startPack(\''+sel.g.id+'\')">🎰 Start Pack Tracker</div>';
+      o+='<div class="B bn" onclick="copyAIPrompt(\''+(sel.g.id||String(sel.g.gn))+'\')">📋 Copy Game Prompt</div>';
+      o+='<div class="B pn" onclick="showAIPrompt(\''+(sel.g.id||String(sel.g.gn))+'\')">👁 Preview</div>';
+      o+='<div class="B on" onclick="startPack(\''+(sel.g.id||String(sel.g.gn))+'\')">🎰 Start Pack Tracker</div>';
       o+='</div>';
       if(S._promptMsg)o+='<div style="color:var(--grn);font-weight:600;margin-top:6px">'+esc(S._promptMsg)+'</div>';
       if(S._promptPreview){
@@ -1455,7 +1463,7 @@ function render(){
         else if(a.gm.sig==="STRONG_BUY"||a.gm.sig==="BUY")reason="Markov: "+a.gm.sig.replace(/_/g," ").toLowerCase();
         else if(a.tpr===a.tp.p)reason="All "+a.tp.p+" top prizes available";
         else reason="Best of "+cnt+" games";
-        o+='<div class="ck" onclick="openDetail(\''+a.g.id+'\')" style="display:flex;justify-content:space-between;align-items:center;padding:8px;margin-bottom:4px;background:var(--bg);border-radius:6px;border-left:3px solid '+scClr+'">';
+        o+='<div class="ck" onclick="openDetail(\''+(a.g.id||String(a.g.gn))+'\')" style="display:flex;justify-content:space-between;align-items:center;padding:8px;margin-bottom:4px;background:var(--bg);border-radius:6px;border-left:3px solid '+scClr+'">';
         o+='<div><span style="font-size:12px;font-weight:800;color:'+prClr(Number(pr2))+'">$'+pr2+'</span> <span style="font-size:12px;font-weight:700;color:var(--wht)">'+esc(a.g.nm)+'</span> <span class="d">#'+a.g.gn+'</span>';
         o+='<div style="font-size:10px;color:var(--dim)">'+reason+' · '+cnt+' game'+(cnt>1?"s":"")+'</div></div>';
         o+='<div style="font-size:20px;font-weight:800;color:'+scClr+'">'+a.sc+'</div></div>';
@@ -1586,7 +1594,7 @@ function render(){
 
       // 9. Ranking context — where does this game sit overall?
       var allScored=S.data.filter(function(x){return x.complete&&x.btpInfo.hasJackpot}).sort(function(x,y){return y.sc-x.sc});
-      var rank=allScored.findIndex(function(x){return x.g.id===a.g.id})+1;
+      var rank=allScored.findIndex(function(x){return x.g.id===a.g.id||String(x.g.gn)===String(a.g.gn)})+1;
       if(rank>0&&allScored.length>=5){
         if(rank<=3)parts.push("Ranked #"+rank+" of "+allScored.length+" games with jackpot tiers.");
         else if(rank>=allScored.length-2)parts.push("Ranked #"+rank+" of "+allScored.length+" — near bottom.");
@@ -1612,7 +1620,7 @@ function render(){
         parts.push("EV breakdown: Floor $"+fN(a.floorEV)+" (guaranteed) + mid $"+Math.round(a.midRangeEV)+" + jackpot $"+a.jackpotEV.toFixed(2)+" = $"+Math.round(a.totalEV)+" total vs $"+fN(a.packPrice)+" cost ("+(a.edge>0?"+":"")+pct(a.edge)+" edge).");
       }
 
-      return{action:action,actionClr:actionClr,icon:icon,text:parts.join(" "),score:a.sc,id:a.g.id,pr:g.pr,name:g.nm+" #"+g.gn,isClosing:!!g.cs,isNew:a.mat<0.15&&a.complete};
+      return{action:action,actionClr:actionClr,icon:icon,text:parts.join(" "),score:a.sc,id:(a.g.id||String(a.g.gn)),pr:g.pr,name:g.nm+" #"+g.gn,isClosing:!!g.cs,isNew:a.mat<0.15&&a.complete};
     }
 
     // Generate narratives for all games worth showing
@@ -1687,22 +1695,25 @@ function render(){
     var wq=S.winSearch.toLowerCase().trim();
     var wf2=allWinners;
     if(S.winGame)wf2=wf2.filter(function(w){return w.gn===S.winGame;});
-    if(wq)wf2=wf2.filter(function(w){return w.store.toLowerCase().indexOf(wq)>=0||w.city.toLowerCase().indexOf(wq)>=0||String(w.gn).indexOf(wq)>=0;});
+    if(wq)wf2=wf2.filter(function(w){var nm='';for(var i=0;i<GD.length;i++)if(String(GD[i].gn)===w.gn){nm=GD[i].nm;break;}return w.store.toLowerCase().indexOf(wq)>=0||w.city.toLowerCase().indexOf(wq)>=0||String(w.gn).indexOf(wq)>=0||nm.toLowerCase().indexOf(wq)>=0;});
     var wsorts={date:function(a,b){return S.winSortDir*(new Date(b.date)-new Date(a.date))},pn:function(a,b){return S.winSortDir*(b.pn-a.pn)},city:function(a,b){return S.winSortDir*a.city.localeCompare(b.city)}};
     wf2.sort(wsorts[S.winSort]||wsorts.date);
-    var gnList=Object.keys(S.winData).sort();
+    var gnList=Object.keys(S.winData).sort(function(a,b){
+      var gA=null,gB=null;for(var i=0;i<GD.length;i++){if(String(GD[i].gn)===a)gA=GD[i];if(String(GD[i].gn)===b)gB=GD[i];}
+      var pA=gA?gA.pr:0,pB=gB?gB.pr:0;if(pA!==pB)return pB-pA;return a.localeCompare(b);});
     o+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">';
-    o+='<input class="I" type="text" placeholder="Search store/city/game..." value="'+esc(S.winSearch)+'" oninput="winSearchInput(this.value)" style="flex:1;min-width:150px">';
-    o+='<select class="I" style="flex:1;min-width:120px" onchange="winGameFilter(this.value)"><option value="">All Games</option>';
-    gnList.forEach(function(gn){o+='<option value="'+gn+'"'+(S.winGame===gn?" selected":"")+'>Game #'+gn+' ('+S.winData[gn].length+')</option>';});
+    o+='<input class="I" type="text" placeholder="Search store, city, game name or #..." value="'+esc(S.winSearch)+'" oninput="winSearchInput(this.value)" style="flex:1;min-width:150px">';
+    o+='<select class="I" style="flex:1;min-width:120px" onchange="winGameFilter(this.value)"><option value="">All Games ('+allWinners.length+' records)</option>';
+    gnList.forEach(function(gn){var gObj=null;for(var i=0;i<GD.length;i++)if(String(GD[i].gn)===gn){gObj=GD[i];break;}var nm=gObj?gObj.nm:'';var pr=gObj?'$'+gObj.pr:'';o+='<option value="'+gn+'"'+(S.winGame===gn?" selected":"")+'>'+pr+' | '+esc(nm)+' #'+gn+' ('+S.winData[gn].length+' claims)</option>';});
     o+='</select></div>';
     o+='<div style="font-size:11px;color:var(--dim);margin-bottom:8px">'+wf2.length+' records | ';
     [["date","Date"],["pn","Pack#"],["city","City"]].forEach(function(s){o+='<span style="cursor:pointer;color:'+(S.winSort===s[0]?"var(--grn)":"var(--dim)")+'" onclick="winSortBy(\''+s[0]+'\')">'+(S.winSort===s[0]?(S.winSortDir>0?"↑":"↓")+" ":"")+s[1]+'</span> ';});
     o+='</div>';
     o+='<div style="overflow-x:auto"><table><thead><tr>';
-    o+='<th style="text-align:left">Game</th><th style="text-align:left">Date</th><th style="text-align:left">Store</th><th style="text-align:left">City</th><th>Pack #</th><th>Ticket</th></tr></thead><tbody>';
+    o+='<th style="text-align:left">Game</th><th style="text-align:left">Name</th><th>Price</th><th style="text-align:left">Date</th><th style="text-align:left">Store</th><th style="text-align:left">City</th><th>Pack #</th><th>Ticket</th></tr></thead><tbody>';
     wf2.slice(0,200).forEach(function(w){
-      o+='<tr><td style="font-weight:700">#'+w.gn+'</td><td>'+esc(w.date)+'</td><td style="text-align:left;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.store)+'</td><td style="text-align:left">'+esc(w.city)+'</td><td style="font-weight:700;color:var(--grn)">'+(w.pn>0?fN(w.pn):"—")+'</td><td>'+(w.tk||"—")+'</td></tr>';
+      var gObj=null;for(var gi=0;gi<GD.length;gi++)if(String(GD[gi].gn)===w.gn){gObj=GD[gi];break;}
+      o+='<tr><td style="font-weight:700">#'+w.gn+'</td><td style="text-align:left;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(gObj?gObj.nm:'')+'</td><td>'+(gObj?'$'+gObj.pr:'')+'</td><td>'+esc(w.date)+'</td><td style="text-align:left;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.store)+'</td><td style="text-align:left">'+esc(w.city)+'</td><td style="font-weight:700;color:var(--grn)">'+(w.pn>0?fN(w.pn):"—")+'</td><td>'+(w.tk||"—")+'</td></tr>';
     });
     o+='</tbody></table></div>';
     if(wf2.length>200)o+='<div style="font-size:11px;color:var(--dim);margin-top:6px">Showing 200 of '+wf2.length+' records.</div>';
@@ -1767,8 +1778,22 @@ function render(){
   }
 
   document.getElementById("app").innerHTML=o;
+}catch(e){document.getElementById("app").innerHTML='<div style="padding:20px;color:red;font-size:14px"><b>Render Error:</b> '+e.message+'<br><pre>'+e.stack+'</pre></div>';console.error("Render error:",e);}
 }
 
+// iOS Safari fix: ensure clicks work on all elements with onclick
+// Walk up from touch target to find clickable ancestor
+document.addEventListener("touchend",function(e){
+  var el=e.target;
+  while(el&&el!==document){
+    if(el.getAttribute&&el.getAttribute("onclick")){
+      e.preventDefault();
+      el.click();
+      return;
+    }
+    el=el.parentElement;
+  }
+},{passive:false});
 window.addEventListener("load",init);
 </script>
 </body>
