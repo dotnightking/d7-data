@@ -536,7 +536,7 @@ function getPackGuidance(g,a,model){
   var remainingJkPrizes=a.jackpotTiers?a.jackpotTiers.reduce(function(s,t){return s+t.rem;},0):0;
   var zones=[];
   if(remainingJkPrizes>0&&a.epr>0){
-    var startPack=Math.round(a.mat*totalPacks),zoneSize=Math.round(a.epr/Math.max(1,remainingJkPrizes));
+    var startPack=Math.max(Math.round(a.mat*totalPacks),lastWinnerPack),zoneSize=Math.round((totalPacks-startPack)/Math.max(1,remainingJkPrizes));
     for(var z=0;z<Math.min(remainingJkPrizes,12);z++){
       var zStart=startPack+z*zoneSize,zEnd=zStart+zoneSize-1;
       zones.push({zone:z+1,start:zStart,end:zEnd,mid:Math.round((zStart+zEnd)/2),
@@ -967,7 +967,11 @@ function buildGamePrompt(a){
   if(a.flags.length>0){L.push("\n--- ACTIVE FLAGS ---");a.flags.forEach(function(f){L.push("["+f.t+"] "+f.m);});}
   // v7.4: Similarity model info
   var jpp=predictJackpotPacks(g,a,null);
-  if(jpp.valid){L.push("\n--- PREDICTION ---");L.push("Prize class: "+jpp.prizeClass);L.push(jpp.note);}
+  if(jpp.valid){L.push("\n--- PREDICTION ---");L.push("Prize class: "+jpp.prizeClass);L.push(jpp.note);
+    jpp.predictions.forEach(function(p){
+      L.push("$"+fN(p.prizeAmt)+" ("+p.role+"): Target pack #"+fN(p.rangeLow)+" → #"+fN(p.rangeHigh)+" (best: #"+fN(p.bestPack)+") | "+p.basis+" | Conf: "+p.confidence);
+    });
+  }
   L.push("\n--- QUESTIONS ---");
   L.push("1. Should I buy a pack of this game? Give a clear YES/NO/MAYBE with confidence level and reasoning.");
   L.push("2. Is the TOP prize genuinely more concentrated in remaining packs? Is the claim lag real or noise?");
@@ -1252,11 +1256,17 @@ function render(){try{
         o+='</div>';
         o+='<div style="font-size:11px;color:var(--text);line-height:1.6">'+esc(pg.gapNarrative)+'</div>';
         o+='</div>';
-        // Recommended pack range
+        // Recommended pack range — use prediction range if available (empirical gap model), else pack guidance
+        var _topPred=jpp&&jpp.valid&&jpp.predictions.length?jpp.predictions[0]:null;
+        var _recMin=_topPred?_topPred.rangeLow:pg.minPackNum;
+        var _recMax=_topPred?_topPred.rangeHigh:pg.maxPackNum;
+        var _recBest=_topPred?_topPred.bestPack:0;
+        var _recBasis=_topPred?_topPred.basis:'Position percentiles';
         o+='<div style="padding:10px;background:#d4a01712;border:1px solid #d4a01730;border-radius:8px;margin-bottom:10px">';
-        o+='<div style="font-size:9px;font-weight:700;color:var(--gld);margin-bottom:6px">RECOMMENDED PACK RANGE</div>';
-        o+='<div style="font-size:20px;font-weight:800;color:var(--grn)">#'+fN(pg.minPackNum)+(pg.maxPackNum<sel.pc*0.95?' → #'+fN(pg.maxPackNum):'+')+'</div>';
-        o+='<div style="font-size:11px;color:var(--text);margin-top:4px">'+esc(pg.specificAdvice)+'</div>';
+        o+='<div style="font-size:9px;font-weight:700;color:var(--gld);margin-bottom:6px">TARGET PACK RANGE'+(sel.g.pz&&sel.g.pz.length?' (for $'+fN(sel.g.pz.slice().sort(function(a,b){return b.a-a.a})[0].a)+' top prize)':'')+'</div>';
+        o+='<div style="font-size:20px;font-weight:800;color:var(--grn)">#'+fN(_recMin)+' → #'+fN(_recMax)+'</div>';
+        if(_recBest)o+='<div style="font-size:11px;color:var(--text);margin-top:4px">Best estimate: <b>#'+fN(_recBest)+'</b></div>';
+        o+='<div style="font-size:9px;color:var(--dim);margin-top:3px">'+esc(_recBasis)+'</div>';
         if(pg.lastWinnerPack>0)o+='<div style="font-size:10px;color:var(--amb);margin-top:3px">Last known claim: pack #'+fN(pg.lastWinnerPack)+'</div>';
         if(pg.usedFallback&&pg.fallbackReason)o+='<div style="font-size:9px;color:var(--amb);margin-top:3px">⚠ '+esc(pg.fallbackReason)+'</div>';
         o+='</div>';
