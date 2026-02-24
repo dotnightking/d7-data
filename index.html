@@ -528,7 +528,8 @@ function getPackGuidance(g,a,model){
   }
   if(!grp||!grp.valid)return{valid:false,reason:'No matching cluster — need more winner data for this game type'};
   var currentSoldPct=(a.mat||0)*100;
-  var minPct=Math.max(currentSoldPct,grp.recommendedMinPct),maxPct=grp.recommendedMaxPct;
+  var minPct=Math.max(currentSoldPct,grp.recommendedMinPct),maxPct=Math.max(grp.recommendedMaxPct,minPct+5);
+  if(maxPct>95)maxPct=95;
   var minPackNum=Math.round((minPct/100)*totalPacks),maxPackNum=Math.round((maxPct/100)*totalPacks);
   var lastWinnerPack=0;
   if(S.winData){var wd=S.winData[String(g.gn)];if(wd&&wd.length)lastWinnerPack=Math.max.apply(null,wd.map(function(r){return r.pn||0;}));}
