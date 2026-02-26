@@ -317,7 +317,7 @@ function analyze(g){
   for(i=0;i<ts.length;i++){if(ts[i].isJackpot&&ts[i].sig==="HOT"&&ts[i].dev<-0.15)flags.push({t:"$"+fN(ts[i].a)+" HOT",m:"Underclaimed",c:"p"});}
   if(!yieldValid&&complete)flags.push({t:"YIELD⚠",m:"Implied yield out of range",c:"a"});
   if(oddsCheck.valid===false&&g.odds>0)flags.push({t:"ODDS⚠",m:"Prize counts vs odds mismatch",c:"a"});
-  return{g:g,pc:pc,aa:aa,ai:ai,acr:acr,eps:eps,epr:epr,ets:ets,etr:etr,
+  var _result={g:g,pc:pc,aa:aa,ai:ai,acr:acr,eps:eps,epr:epr,ets:ets,etr:etr,
     tpvp:tpvp,tpvc:tpvc,tpvr:tpvr,pkc:pkc,complete:complete,
     totalTickets:totalTickets,packPrice:packPrice,totEstimated:totalTickets!==g.tot,
     designedReturn:designedReturn,soldReturn:soldReturn,remainReturn:remainReturn,
@@ -342,6 +342,8 @@ function analyze(g){
     scoreBreakdown:scoreBreakdown,whyScore:whyScore,
     tierAdv:tierAdv,tierCats:tierCats,prizes:prizes,
     gm:{ts:ts,sig:gSig,rsn:gRsn},flags:flags,prizeClass:tp.a>1000?'high':'low'};
+  _result.archetype=classifyArchetype(_result);
+  return _result;
 }
 
 // === MONTE CARLO ===
@@ -418,8 +420,13 @@ function saveTrend(){
     if(t[k].length>60)t[k]=t[k].slice(-60);
   });
   localStorage.setItem("txt7",JSON.stringify(t));
+  clearTrendCache();
 }
-function getTrend(id){return(JSON.parse(localStorage.getItem("txt7")||"{}"))[id]||[];}
+function getTrend(id){
+  if(!S._trendCache){try{S._trendCache=JSON.parse(localStorage.getItem("txt7")||"{}");}catch(e){S._trendCache={};}}
+  return S._trendCache[id]||[];
+}
+function clearTrendCache(){S._trendCache=null;}
 
 function computeBurnRate(id,a){
   var trend=getTrend(id);
@@ -785,7 +792,7 @@ var S={tab:"picks",selId:null,sortBy:"score",filterPr:"all",data:[],moreTab:"pac
   _promptPreview:null,_allPromptPreview:null,_promptMsg:null,
   bankroll:Number(localStorage.getItem("txb7")||"1000"),
   detailSearch:"",insightFilter:null,winSearch:"",winSort:"date",winSortDir:-1,winGame:"",
-  winPage:0,winPageSize:50};
+  winPage:0,winPageSize:50,_showLoader:false};
 
 function applyStatScoring(data){
   if(!data||data.length===0)return;
@@ -1125,14 +1132,16 @@ function buildNarrative(a){
     else parts.push("Fragility: if 1 more claimed, density drops to ~"+shiftIfClaimed.toFixed(2)+"x.");}
   if(a.g.cs&&a.tpr>0&&a.epr>0){var weeksLeft=a.epr>10000?">4 weeks":a.epr>5000?"2-4 weeks":a.epr>1000?"1-2 weeks":"days";parts.push("Estimated "+weeksLeft+" before game pulled.");}
   // Winner context
-  var _nwc=getGameWinners(g.gn);
-  if(_nwc.length>0){var _nlw=_nwc[0];parts.push("🏆 "+_nwc.length+" winner claims on file. Latest: pack #"+(_nlw.pn>0?fN(_nlw.pn):"?")+' on '+(_nlw.date||'?')+' at '+(_nlw.store||'')+', '+(_nlw.city||'')+'.');}
+  var _nwc=S.winData?S.winData[String(g.gn)]:null;var _nwcLen=_nwc?_nwc.length:0;
+  var _nlw=null;if(_nwc&&_nwc.length){_nlw=_nwc[0];for(var nwi=1;nwi<_nwc.length;nwi++)if((_nwc[nwi].pn||0)>(_nlw.pn||0))_nlw=_nwc[nwi];}
+  if(_nwcLen>0&&_nlw){parts.push("🏆 "+_nwcLen+" winner claims. Latest: pack #"+(_nlw.pn>0?fN(_nlw.pn):"?")+' on '+(_nlw.date||'?')+' at '+(_nlw.store||'')+', '+(_nlw.city||'')+'.');}
   if(a.floorEV>0&&a.packPrice>0&&a.tpr>0)parts.push("EV: Floor $"+fN(a.floorEV)+" + mid $"+Math.round(a.midRangeEV)+" + JK $"+a.jackpotEV.toFixed(2)+" = $"+Math.round(a.totalEV)+" vs $"+fN(a.packPrice)+" cost ("+(a.edge>0?"+":"")+pct(a.edge)+" edge).");
   return{action:action,actionClr:actionClr,icon:icon,text:parts.join(" "),score:a.sc,id:(a.g.id||String(a.g.gn)),pr:g.pr,name:g.nm+" #"+g.gn,isClosing:!!g.cs,isNew:a.mat<0.15&&a.complete};
 }
 
 // === RENDER ===
 function render(){try{
+  clearTrendCache();
   var pr={};GD.forEach(function(g){pr[g.pr]=1});var pArr=Object.keys(pr).map(Number).sort(function(a,b){return a-b});
   var f=S.data.slice();
   if(S.filterPr!=="all")f=f.filter(function(a){return a.g.pr===Number(S.filterPr)});
@@ -1189,9 +1198,11 @@ function render(){try{
     for(var idx=0;idx<f.length;idx++){
       var a=f[idx],tr2=getTrend((a.g.id||String(a.g.gn)));
       var _br=computeBurnRate((a.g.id||String(a.g.gn)),a);
-      var _arch=classifyArchetype(a);
-      var _wc=getGameWinners(a.g.gn);
-      var _jpp=predictJackpotPacks(a.g,a,null);
+      var _arch=a.archetype||{label:'—',color:'var(--dim)'};
+      // Lightweight winner lookup — no sort, no copy
+      var _wc=S.winData?S.winData[String(a.g.gn)]:null;
+      var _wcLen=_wc?_wc.length:0;
+      var _lwp=null;if(_wc&&_wc.length){_lwp=_wc[0];for(var wi=1;wi<_wc.length;wi++)if((_wc[wi].pn||0)>(_lwp.pn||0))_lwp=_wc[wi];}
       o+='<div class="C ck" onclick="openDetail(\''+(a.g.id||String(a.g.gn))+'\')">';
       if(idx===0&&f.length>1)o+='<div class="badge" style="right:12px;background:var(--grn);color:var(--bg)">TOP PICK</div>';
       if(a.g.cs)o+='<div class="badge" style="right:'+(idx===0&&f.length>1?'85px':'12px')+';background:var(--red);color:#fff">CLOSING</div>';
@@ -1234,21 +1245,21 @@ function render(){try{
           var rc=j.role==="TOP"?"#d4a017":j.role==="TOP-1"?"#af7ac5":"#5a6a7a";
           o+='<div style="font-size:10px"><span style="font-size:8px;color:'+rc+'">'+j.role+'</span> <span style="font-weight:700;color:'+jc+'">$'+fN(j.a)+'</span> '+(j.remaining<=0?'<span class="r">GONE</span>':'<span class="d">'+j.remaining+'/'+j.printed+' '+j.shift.toFixed(2)+'x</span>')+'</div>';});
         o+='</div>';}
-      // Prediction summary
-      if(_jpp.valid&&_jpp.predictions.length>0){
-        var _tp=_jpp.predictions[0];
+      // Prediction summary — use pre-computed jackpotShifts instead of calling predictJackpotPacks
+      if(a.jackpotShifts.length>0&&a.jackpotShifts[0].remaining>0){
+        var _topJs=a.jackpotShifts[0];
+        var _estGap=a.epr>0&&_topJs.remaining>0?Math.round(a.epr/_topJs.remaining):0;
         o+='<div style="margin-top:4px;padding:4px 8px;background:#9b59b610;border-radius:6px;font-size:10px">';
-        o+='<span style="color:var(--pur);font-weight:700">🔮 $'+fN(_tp.prizeAmt)+'</span> target: <span style="font-weight:700;color:var(--grn)">#'+fN(_tp.rangeLow)+'—#'+fN(_tp.rangeHigh)+'</span>';
-        o+=' <span class="d">(best #'+fN(_tp.bestPack)+')</span>';
-        if(_jpp.lastWinnerPack>0)o+=' · <span class="d">Last win: #'+fN(_jpp.lastWinnerPack)+'</span>';
+        o+='<span style="color:var(--pur);font-weight:700">🔮 $'+fN(_topJs.a)+'</span> '+_topJs.remaining+' left · every ~'+fN(_estGap)+' packs · odds 1:'+fN(_topJs.currentOdds)+'/pack';
+        var _lwpk=0;if(S.winData&&S.winData[String(a.g.gn)]){var _wd2=S.winData[String(a.g.gn)];for(var w2i=0;w2i<_wd2.length;w2i++)if((_wd2[w2i].pn||0)>_lwpk)_lwpk=_wd2[w2i].pn;}
+        if(_lwpk>0)o+=' · <span class="d">Last win: #'+fN(_lwpk)+'</span>';
         o+='</div>';
       }
       // Winner claims summary
-      if(_wc.length>0){
+      if(_wcLen>0&&_lwp){
         o+='<div style="margin-top:4px;padding:4px 8px;background:#d4a01710;border-radius:6px;font-size:10px">';
-        o+='<span style="color:var(--gld);font-weight:700">🏆 '+_wc.length+' claims</span>';
-        var _lwp=_wc[0];
-        if(_lwp)o+=' · Latest: Pack #'+((_lwp.pn>0)?fN(_lwp.pn):'?')+' on '+esc(_lwp.date||'')+' · '+fmtStoreShort(_lwp);
+        o+='<span style="color:var(--gld);font-weight:700">🏆 '+_wcLen+' claims</span>';
+        o+=' · Latest: Pack #'+((_lwp.pn>0)?fN(_lwp.pn):'?')+' on '+esc(_lwp.date||'')+' · '+fmtStoreShort(_lwp);
         o+='</div>';
       }
       // Flags
@@ -1271,7 +1282,7 @@ function render(){try{
     o+='</select></div>';
 
     if(sel){
-      var _arch2=classifyArchetype(sel);
+      var _arch2=sel.archetype||classifyArchetype(sel);
       var _selWin=getGameWinners(sel.g.gn);
       var selConfClr=sel.confidence>=85?"var(--grn)":sel.confidence>=70?"var(--blu)":sel.confidence>=50?"var(--dim)":sel.confidence>=30?"var(--amb)":"var(--red)";
       // Header
@@ -1597,11 +1608,12 @@ function render(){try{
       priceKeys.forEach(function(pr2){
         var a=byPrice[pr2];
         var scClr=a.confidence>=70?"var(--grn)":a.confidence>=40?"var(--amb)":"var(--red)";
-        var _wc2=getGameWinners(a.g.gn);
+        var _wc2=S.winData?S.winData[String(a.g.gn)]:null;var _wc2Len=_wc2?_wc2.length:0;
+        var _lw2=null;if(_wc2&&_wc2.length){_lw2=_wc2[0];for(var w3i=1;w3i<_wc2.length;w3i++)if((_wc2[w3i].pn||0)>(_lw2.pn||0))_lw2=_wc2[w3i];}
         o+='<div class="ck" onclick="openDetail(\''+(a.g.id||String(a.g.gn))+'\')" style="display:flex;justify-content:space-between;align-items:center;padding:6px;margin-bottom:4px;background:var(--bg);border-radius:6px;border-left:3px solid '+scClr+'">';
         o+='<div style="flex:1;min-width:0"><span style="font-size:11px;font-weight:800;color:'+prClr(Number(pr2))+'">$'+pr2+'</span> <span style="font-size:11px;font-weight:700;color:var(--wht)">'+esc(a.g.nm)+'</span> <span class="d">#'+a.g.gn+'</span>';
         o+='<div style="font-size:9px;color:var(--dim)">Top: '+a.tpr+'/'+a.tp.p+' $'+fN(a.tp.a)+' · jkD:'+a.jackpotDensityShift.toFixed(2)+'x';
-        if(_wc2.length>0){var _lw2=_wc2[0];o+=' · Last win: #'+(_lw2.pn>0?fN(_lw2.pn):'?')+' '+esc(_lw2.date||'');}
+        if(_wc2Len>0&&_lw2){o+=' · Last win: #'+(_lw2.pn>0?fN(_lw2.pn):'?')+' '+esc(_lw2.date||'');}
         o+='</div></div>';
         o+='<div style="font-size:18px;font-weight:800;color:'+scClr+'">'+a.sc+'</div></div>';
       });
