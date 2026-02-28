@@ -1449,14 +1449,20 @@ function render(){try{
       else if(!a.complete)o+='<div class="badge" style="left:12px;background:var(--amb);color:var(--bg)">PARTIAL</div>';
       o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div style="flex:1;min-width:0">';
       o+='<div style="font-size:15px;font-weight:700;color:var(--wht);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.g.nm)+' <span class="d" style="font-weight:400">#'+a.g.gn+'</span></div>';
-      o+='<div style="font-size:11px;color:var(--dim)">$'+a.g.pr+(a.g.pk?' · '+a.g.pk+'/pk':'')+(a.aa?' · BTP:$'+fN(a.aa):'')+(a.g.guar?' · Fl:$'+fN(a.g.guar):'')+(_br?' · <span style="color:var(--amb)">🔥'+fN(_br.packsPerDay)+'/day</span>':'')+'</div></div>';
-      // Sold% bar — prominent
+      o+='<div style="font-size:11px;color:var(--dim)">$'+a.g.pr+(a.g.pk?' · '+a.g.pk+'/pk':'')+(a.aa?' · BTP:$'+fN(a.aa):'')+(a.g.guar?' · Fl:$'+fN(a.g.guar):'')+'</div></div>';
+      var confClr=a.confidence>=85?"var(--grn)":a.confidence>=70?"var(--blu)":a.confidence>=50?"var(--dim)":a.confidence>=30?"var(--amb)":"var(--red)";
+      o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+confClr+';font-size:26px">'+a.sc+'<span style="font-size:12px;font-weight:600"> pts</span></div>';
+      o+='<div style="font-size:9px;color:var(--dim)">#'+a.rank+' of '+a.rankOf+'</div>';
+      o+='<div style="font-size:10px;font-weight:700;color:'+confClr+'">'+a.confidence+'% '+a.confLabel+'</div>';
+      if(tr2.length>=3)o+='<div style="margin-top:2px">'+sparkline(tr2,"sc",14)+'</div>';
+      o+='</div></div>';
+      // Sold% bar — prominent (outside flex)
       if(a.pc>0){var _soldPct=Math.round(a.mat*100),_barClr=_soldPct>80?'var(--red)':_soldPct>50?'var(--amb)':'var(--grn)';
         o+='<div style="margin-top:6px;display:flex;align-items:center;gap:8px">';
         o+='<div style="flex:1"><div style="height:8px;background:var(--bg);border-radius:4px;overflow:hidden"><div style="height:100%;width:'+_soldPct+'%;background:'+_barClr+';border-radius:4px"></div></div></div>';
         o+='<div style="font-size:14px;font-weight:800;color:'+_barClr+'">'+_soldPct+'%</div>';
         o+='<div style="font-size:11px;color:var(--wht);font-weight:700">'+fN(a.epr)+'<span style="font-size:9px;color:var(--dim);font-weight:400"> left</span></div>';
-        if(_br){var _tpd=_br.packsPerDay*a.g.pk;o+='<div style="font-size:11px;font-weight:700;color:var(--amb)">🔥'+fN(_br.packsPerDay)+'<span style="font-size:9px;font-weight:400">pk/day</span> <span style="font-size:9px;color:var(--dim);font-weight:400">('+fN(_tpd)+'tk)</span></div>';}
+        if(_br){var _tpd=_br.packsPerDay*(a.g.pk||1);o+='<div style="font-size:11px;font-weight:700;color:var(--amb)">🔥'+fN(_br.packsPerDay)+'<span style="font-size:9px;font-weight:400">pk/d</span> <span style="font-size:9px;color:var(--dim);font-weight:400">('+fN(_tpd)+'tk)</span></div>';}
         o+='</div>';
       }
       // Archetype badge
@@ -1474,12 +1480,6 @@ function render(){try{
         _wcs.forEach(function(r,ri){if(ri>0)o+=' · ';o+='<span style="color:var(--grn)">Pk#'+(r.pn>0?fN(r.pn):'?')+'</span>';if(r.tk)o+='<span class="d">/Tk'+r.tk+'</span>';o+=' <span class="d">'+esc(r.city||'')+'</span>';});
         o+='</div>';
       }
-      var confClr=a.confidence>=85?"var(--grn)":a.confidence>=70?"var(--blu)":a.confidence>=50?"var(--dim)":a.confidence>=30?"var(--amb)":"var(--red)";
-      o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+confClr+';font-size:26px">'+a.sc+'<span style="font-size:12px;font-weight:600"> pts</span></div>';
-      o+='<div style="font-size:9px;color:var(--dim)">#'+a.rank+' of '+a.rankOf+'</div>';
-      o+='<div style="font-size:10px;font-weight:700;color:'+confClr+'">'+a.confidence+'% '+a.confLabel+'</div>';
-      if(tr2.length>=3)o+='<div style="margin-top:2px">'+sparkline(tr2,"sc",14)+'</div>';
-      o+='</div></div>';
       if(a.whyScore.length>0){o+='<div style="margin-top:5px">';a.whyScore.forEach(function(w){var c=w.p>0?"var(--grn)":w.p<0?"var(--red)":"var(--dim)";o+='<span class="why-tag" style="background:'+c+'15;color:'+c+';border:1px solid '+c+'30">'+(w.p>0?"▲":"▼")+" "+w.f+'</span>';});o+='</div>';}
       o+='<div class="G" style="grid-template-columns:repeat(auto-fit,minmax(90px,1fr));margin-top:8px">';
       [{l:"JK Density",v:a.jackpotDensityShift>0?a.jackpotDensityShift.toFixed(2)+"x":"—",c:a.jackpotDensityShift>=1.2?"g":a.jackpotDensityShift>=0.9?"d":"r"},
@@ -1628,6 +1628,7 @@ function render(){try{
       // ============================================================
       // v7.5: PROJECTION ENGINE — replaces Monte Carlo with deterministic model
       // ============================================================
+      try{
       var _ew=elliottWaveBurnRate((sel.g.id||String(sel.g.gn)),sel);
       var _proj=comprehensiveProjection(sel,burn,_ew);
       if(_proj.valid){
@@ -1789,6 +1790,7 @@ function render(){try{
 
         o+='</div>';// end PROJECTION ENGINE card
       }
+      }catch(e){o+='<div class="C" style="border-color:var(--red)44"><div class="L" style="color:var(--red)">📊 PROJECTION ENGINE</div><div style="font-size:10px;color:var(--dim)">Error: '+esc(String(e.message||e))+'</div></div>';}
 
       // === v7.1: PACK GUIDANCE CARD ===
       var pg=S.winModel?getPackGuidance(sel.g,sel,S.winModel):{valid:false,reason:'Fetch winners to enable guidance'};
