@@ -1447,22 +1447,19 @@ function render(){try{
       if(a.g.cs)o+='<div class="badge" style="right:'+(idx===0&&f.length>1?'95px':'12px')+';background:var(--red);color:#fff">CLOSING</div>';
       if(!a.btpInfo.hasJackpot)o+='<div class="badge" style="left:12px;background:var(--dim);color:var(--bg)">NO JK</div>';
       else if(!a.complete)o+='<div class="badge" style="left:12px;background:var(--amb);color:var(--bg)">PARTIAL</div>';
-      o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div style="flex:1;min-width:0">';
-      o+='<div style="font-size:15px;font-weight:700;color:var(--wht);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.g.nm)+' <span class="d" style="font-weight:400">#'+a.g.gn+'</span></div>';
-      o+='<div style="font-size:11px;color:var(--dim)">$'+a.g.pr+(a.g.pk?' · '+a.g.pk+'/pk':'')+(a.aa?' · BTP:$'+fN(a.aa):'')+(a.g.guar?' · Fl:$'+fN(a.g.guar):'')+'</div></div>';
-      var confClr=a.confidence>=85?"var(--grn)":a.confidence>=70?"var(--blu)":a.confidence>=50?"var(--dim)":a.confidence>=30?"var(--amb)":"var(--red)";
-      o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+confClr+';font-size:26px">'+a.sc+'<span style="font-size:12px;font-weight:600"> pts</span></div>';
-      o+='<div style="font-size:9px;color:var(--dim)">#'+a.rank+' of '+a.rankOf+'</div>';
-      o+='<div style="font-size:10px;font-weight:700;color:'+confClr+'">'+a.confidence+'% '+a.confLabel+'</div>';
-      if(tr2.length>=3)o+='<div style="margin-top:2px">'+sparkline(tr2,"sc",14)+'</div>';
-      o+='</div></div>';
-      // Sold% bar — prominent (outside flex)
+      // Game name — ALWAYS full width, never crushed
+      o+='<div style="font-size:15px;font-weight:700;color:var(--wht);margin-bottom:2px">'+esc(a.g.nm)+' <span class="d" style="font-weight:400">#'+a.g.gn+'</span></div>';
+      // Score + info row
+      o+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">';
+      o+='<div style="flex:1;min-width:0">';
+      o+='<div style="font-size:11px;color:var(--dim)">$'+a.g.pr+(a.g.pk?' · '+a.g.pk+'/pk':'')+(a.aa?' · BTP:$'+fN(a.aa):'')+(a.g.guar?' · Fl:$'+fN(a.g.guar):'')+'</div>';
+      // Sold% bar
       if(a.pc>0){var _soldPct=Math.round(a.mat*100),_barClr=_soldPct>80?'var(--red)':_soldPct>50?'var(--amb)':'var(--grn)';
-        o+='<div style="margin-top:6px;display:flex;align-items:center;gap:8px">';
+        o+='<div style="margin-top:4px;display:flex;align-items:center;gap:6px">';
         o+='<div style="flex:1"><div style="height:8px;background:var(--bg);border-radius:4px;overflow:hidden"><div style="height:100%;width:'+_soldPct+'%;background:'+_barClr+';border-radius:4px"></div></div></div>';
-        o+='<div style="font-size:14px;font-weight:800;color:'+_barClr+'">'+_soldPct+'%</div>';
-        o+='<div style="font-size:11px;color:var(--wht);font-weight:700">'+fN(a.epr)+'<span style="font-size:9px;color:var(--dim);font-weight:400"> left</span></div>';
-        if(_br){var _tpd=_br.packsPerDay*(a.g.pk||1);o+='<div style="font-size:11px;font-weight:700;color:var(--amb)">🔥'+fN(_br.packsPerDay)+'<span style="font-size:9px;font-weight:400">pk/d</span> <span style="font-size:9px;color:var(--dim);font-weight:400">('+fN(_tpd)+'tk)</span></div>';}
+        o+='<span style="font-size:14px;font-weight:800;color:'+_barClr+'">'+_soldPct+'%</span>';
+        o+='<span style="font-size:11px;color:var(--wht);font-weight:700">'+fN(a.epr)+'<span style="font-size:9px;color:var(--dim);font-weight:400"> left</span></span>';
+        if(_br){var _tpd=_br.packsPerDay*(a.g.pk||1);o+='<span style="font-size:11px;font-weight:700;color:var(--amb)">🔥'+fN(_br.packsPerDay)+'<span style="font-size:9px;font-weight:400">pk/d</span> <span style="font-size:9px;color:var(--dim);font-weight:400">('+fN(_tpd)+'tk)</span></span>';}
         o+='</div>';
       }
       // Archetype badge
@@ -1471,7 +1468,14 @@ function render(){try{
       o+='<span style="font-size:9px;font-weight:700;padding:2px 8px;border-radius:4px;background:'+_arch.color+'20;color:'+_arch.color+';border:1px solid '+_arch.color+'40">'+_arch.label+'</span>';
       if(a._fbNote&&a._fbNote.length)o+='<span style="font-size:8px;color:var(--amb)">⚠ '+esc(a._fbNote[0])+'</span>';
       o+='</div>';
-      // All winners with pack# and ticket#
+      o+='</div>';// close left column
+      var confClr=a.confidence>=85?"var(--grn)":a.confidence>=70?"var(--blu)":a.confidence>=50?"var(--dim)":a.confidence>=30?"var(--amb)":"var(--red)";
+      o+='<div style="text-align:right;flex-shrink:0"><div class="V" style="color:'+confClr+';font-size:26px">'+a.sc+'<span style="font-size:12px;font-weight:600"> pts</span></div>';
+      o+='<div style="font-size:9px;color:var(--dim)">#'+a.rank+' of '+a.rankOf+'</div>';
+      o+='<div style="font-size:10px;font-weight:700;color:'+confClr+'">'+a.confidence+'% '+a.confLabel+'</div>';
+      if(tr2.length>=3)o+='<div style="margin-top:2px">'+sparkline(tr2,"sc",14)+'</div>';
+      o+='</div></div>';
+      // All winners — full width below flex
       var _wc=S.winData&&S.winData[String(a.g.gn)]?S.winData[String(a.g.gn)]:null;
       if(_wc&&_wc.length>0){
         var _wcs=_wc.slice().sort(function(x,y){return(y.pn||0)-(x.pn||0)});
