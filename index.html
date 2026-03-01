@@ -1413,7 +1413,10 @@ function render(){try{
     else if(iF==="new")f=f.filter(function(a){return a.mat<0.15&&a.complete&&a.btpInfo.hasJackpot});
     else if(iF==="concentrated")f=f.filter(function(a){return a.jackpotDensityShift>=1.3});
     else if(iF==="depleted")f=f.filter(function(a){return a.tpr===0&&a.btpInfo.hasJackpot});}
-  var sorts={score:function(a,b){return b.sc-a.sc},density:function(a,b){return b.jackpotDensityShift-a.jackpotDensityShift},gap:function(a,b){return b.returnGap-a.returnGap},topOdds:function(a,b){return a.tpo-b.tpo},tickets:function(a,b){return a.mat-b.mat},hyper:function(a,b){return b.hyperRatio-a.hyperRatio},jackpotEV:function(a,b){return b.jackpotEV-a.jackpotEV}};
+  var sorts={score:function(a,b){return b.sc-a.sc},density:function(a,b){return b.jackpotDensityShift-a.jackpotDensityShift},gap:function(a,b){return b.returnGap-a.returnGap},topOdds:function(a,b){return a.tpo-b.tpo},tickets:function(a,b){return a.mat-b.mat},hyper:function(a,b){return b.hyperRatio-a.hyperRatio},jackpotEV:function(a,b){return b.jackpotEV-a.jackpotEV},topLag:function(a,b){return b.topClaimLag-a.topClaimLag},claimGap:function(a,b){var ga=S._claimGapCache?S._claimGapCache[a.g.gn]||0:0,gb=S._claimGapCache?S._claimGapCache[b.g.gn]||0:0;return gb-ga},burn:function(a,b){var ba=S._burnCache&&S._burnCache[a.g.gn],bb=S._burnCache&&S._burnCache[b.g.gn];return(bb?bb.packsPerDay:0)-(ba?ba.packsPerDay:0)}};
+  // Cache burn rates for sorting
+  if(S.sortBy==='burn'){S._burnCache={};f.forEach(function(a){var br=computeBurnRate((a.g.id||String(a.g.gn)),a);if(br)S._burnCache[a.g.gn]=br;});}
+  if(S.sortBy==='claimGap'){S._claimGapCache={};var now=new Date();f.forEach(function(a){var wd=S.winData&&S.winData[String(a.g.gn)];if(!wd||!wd.length){S._claimGapCache[a.g.gn]=0;return;}var latest=null;wd.forEach(function(r){if(r.date){var d=new Date(r.date);if(!latest||d>latest)latest=d;}});S._claimGapCache[a.g.gn]=latest?Math.round((now-latest)/86400000):0;});}
   f.sort(sorts[S.sortBy]||sorts.score);
   var sel=null;if(S.selId){for(var i=0;i<S.data.length;i++){if(S.data[i].g.id===S.selId||String(S.data[i].g.gn)===String(S.selId)){sel=S.data[i];break;}}}
 
@@ -1437,7 +1440,7 @@ function render(){try{
     o+='<div class="FR"><span class="L" style="margin:0">PRICE:</span>';
     ["all"].concat(pArr).forEach(function(p){var v=String(p);o+='<div class="B'+(S.filterPr===v?" on":"")+'" onclick="setFilter(\''+v+'\')" style="padding:5px 10px">'+(v==="all"?"ALL":"$"+v)+'</div>';});
     o+='</div><div class="FR"><span class="L" style="margin:0">SORT:</span>';
-    [["score","Score"],["density","JK Density"],["hyper","JK P(pack)"],["jackpotEV","JK EV"],["gap","Gap"],["topOdds","Top Odds"],["tickets","Fresh"]].forEach(function(s){o+='<div class="B'+(S.sortBy===s[0]?" bn":"")+'" onclick="setSort(\''+s[0]+'\')" style="padding:5px 10px">'+s[1]+'</div>';});
+    [["score","Score"],["density","JK Density"],["hyper","JK P(pack)"],["jackpotEV","JK EV"],["gap","Gap"],["topOdds","Top Odds"],["topLag","Top Lag"],["claimGap","Claim Gap"],["burn","Burn Rate"],["tickets","Fresh"]].forEach(function(s){o+='<div class="B'+(S.sortBy===s[0]?" bn":"")+'" onclick="setSort(\''+s[0]+'\')" style="padding:5px 10px">'+s[1]+'</div>';});
     o+='</div>';
     for(var idx=0;idx<f.length;idx++){
       var a=f[idx],tr2=getTrend((a.g.id||String(a.g.gn)));
